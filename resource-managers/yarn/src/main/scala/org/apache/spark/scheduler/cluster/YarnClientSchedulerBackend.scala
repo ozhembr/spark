@@ -23,19 +23,14 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.apache.hadoop.yarn.api.records.YarnApplicationState
 
-import org.apache.spark.{SparkContext, SparkException}
+import org.apache.spark.SparkException
 import org.apache.spark.deploy.yarn.{Client, ClientArguments, YarnAppReport}
 import org.apache.spark.deploy.yarn.config._
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.config
 import org.apache.spark.launcher.SparkAppHandle
-import org.apache.spark.scheduler.TaskSchedulerImpl
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 
-private[spark] class YarnClientSchedulerBackend(
-    scheduler: TaskSchedulerImpl,
-    sc: SparkContext)
-  extends YarnSchedulerBackend(scheduler, sc)
-  with Logging {
+private[spark] trait YarnClientSchedulerBackend extends YarnSchedulerBackend {
 
   private var client: Client = null
   private var monitorThread: MonitorThread = null
@@ -44,7 +39,7 @@ private[spark] class YarnClientSchedulerBackend(
    * Create a Yarn client to submit an application to the ResourceManager.
    * This waits until the application is running.
    */
-  override def start(): Unit = {
+  abstract override def start(): Unit = {
     super.start()
 
     val driverHost = conf.get(config.DRIVER_HOST_ADDRESS)
@@ -151,7 +146,7 @@ private[spark] class YarnClientSchedulerBackend(
   /**
    * Stop the scheduler. This assumes `start()` has already been called.
    */
-  override def stop(): Unit = {
+  abstract override def stop(): Unit = {
     assert(client != null, "Attempted to stop this scheduler before starting it!")
     if (monitorThread != null) {
       monitorThread.stopMonitor()
@@ -170,7 +165,7 @@ private[spark] class YarnClientSchedulerBackend(
     logInfo("YARN client scheduler backend Stopped")
   }
 
-  override protected def updateDelegationTokens(tokens: Array[Byte]): Unit = {
+  abstract override def updateDelegationTokens(tokens: Array[Byte]): Unit = {
     super.updateDelegationTokens(tokens)
     amEndpoint.foreach(_.send(UpdateDelegationTokens(tokens)))
   }

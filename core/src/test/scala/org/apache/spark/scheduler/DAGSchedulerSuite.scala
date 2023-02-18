@@ -17,6 +17,7 @@
 
 package org.apache.spark.scheduler
 
+import java.nio.ByteBuffer
 import java.util.Properties
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
@@ -180,6 +181,22 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
       decommissionInfo: ExecutorDecommissionInfo): Unit = {}
     override def getExecutorDecommissionState(
       executorId: String): Option[ExecutorDecommissionState] = None
+
+
+    override def initialize(backend: SchedulerBackend): Unit = ???
+
+    override def statusUpdate(tid: Long, state: TaskState.TaskState, serializedData: ByteBuffer): Unit = ???
+
+    override def getExecutorsAliveOnHost(host: String): Option[Set[String]] = ???
+
+    override def excludedNodes(): Set[String] = ???
+
+    override def resourceOffers(
+      offers: IndexedSeq[WorkerOffer], isAllFreeResources: Boolean): Seq[Seq[TaskDescription]] = ???
+
+    override def taskSetManagerByTaskId(taskId: Long): Option[TaskSetManager] = ???
+
+    override def isExecutorBusy(execId: String): Boolean = ???
   }
 
   /**
@@ -480,12 +497,12 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
 
     submit(rddD, Array(0))
 
-    assert(scheduler.shuffleIdToMapStage.size === 3)
+    assert(scheduler.shuffleIdToStageMap.size === 3)
     assert(scheduler.activeJobs.size === 1)
 
-    val mapStageA = scheduler.shuffleIdToMapStage(s_A)
-    val mapStageB = scheduler.shuffleIdToMapStage(s_B)
-    val mapStageC = scheduler.shuffleIdToMapStage(s_C)
+    val mapStageA = scheduler.shuffleIdToStageMap(s_A)
+    val mapStageB = scheduler.shuffleIdToStageMap(s_B)
+    val mapStageC = scheduler.shuffleIdToStageMap(s_C)
     val finalStage = scheduler.activeJobs.head.finalStage
 
     assert(mapStageA.parents.isEmpty)
@@ -716,7 +733,7 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
     (1 to 30).foreach(_ => rdd = rdd.zip(rdd))
     // getPreferredLocs runs quickly, indicating that exponential graph traversal is avoided.
     failAfter(10.seconds) {
-      val preferredLocs = scheduler.getPreferredLocs(rdd, 0)
+      val preferredLocs = scheduler.getPreferredLocs(rdd, Seq(0))(0)
       // No preferred locations are returned.
       assert(preferredLocs.length === 0)
     }
@@ -791,6 +808,22 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
         decommissionInfo: ExecutorDecommissionInfo): Unit = {}
       override def getExecutorDecommissionState(
         executorId: String): Option[ExecutorDecommissionState] = None
+
+      override def initialize(backend: SchedulerBackend): Unit = ???
+
+      override def statusUpdate(
+        tid: Long, state: TaskState.TaskState, serializedData: ByteBuffer): Unit = ???
+
+      override def getExecutorsAliveOnHost(host: String): Option[Set[String]] = ???
+
+      override def excludedNodes(): Set[String] = ???
+
+      override def resourceOffers(
+        offers: IndexedSeq[WorkerOffer], isAllFreeResources: Boolean): Seq[Seq[TaskDescription]] = ???
+
+      override def taskSetManagerByTaskId(taskId: Long): Option[TaskSetManager] = ???
+
+      override def isExecutorBusy(execId: String): Boolean = ???
     }
     val noKillScheduler = new DAGScheduler(
       sc,
@@ -3336,7 +3369,7 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
     val ereqs3 = new ExecutorResourceRequests().cores(3)
     val treqs3 = new TaskResourceRequests().cpus(2)
     val rp3 = new ResourceProfile(ereqs3.requests, treqs3.requests)
-    var mergedRp = scheduler.mergeResourceProfilesForStage(HashSet(rp1, rp2, rp3))
+    var mergedRp = scheduler.mergeResourceProfilesForStage(Set(rp1, rp2, rp3))
 
     assert(mergedRp.getTaskCpus.get == 2)
     assert(mergedRp.getExecutorCores.get == 4)
@@ -3411,7 +3444,7 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
     assert(scheduler.jobIdToStageIds.isEmpty)
     assert(scheduler.stageIdToStage.isEmpty)
     assert(scheduler.runningStages.isEmpty)
-    assert(scheduler.shuffleIdToMapStage.isEmpty)
+    assert(scheduler.shuffleIdToStageMap.isEmpty)
     assert(scheduler.waitingStages.isEmpty)
     assert(scheduler.outputCommitCoordinator.isEmpty)
   }

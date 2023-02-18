@@ -72,6 +72,8 @@ private[spark] abstract class RpcEnv(conf: SparkConf) {
 
   private[spark] val defaultLookupTimeout = RpcUtils.lookupRpcTimeout(conf)
 
+  def getConf: SparkConf = conf
+
   /**
    * Return RpcEndpointRef of the registered [[RpcEndpoint]]. Will be used to implement
    * [[RpcEndpoint.self]]. Return `null` if the corresponding [[RpcEndpointRef]] does not exist.

@@ -30,6 +30,7 @@ import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
+import org.apache.spark.scheduler.parallel.ParallelSchedulerBackend
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util._
 
@@ -221,6 +222,11 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
             //    those executors to avoid app hang
             sc.schedulerBackend match {
               case backend: CoarseGrainedSchedulerBackend =>
+                backend.driverEndpoint.send(RemoveExecutor(executorId,
+                  ExecutorProcessLost(
+                    s"Executor heartbeat timed out after ${now - lastSeenMs} ms")))
+
+              case backend: ParallelSchedulerBackend =>
                 backend.driverEndpoint.send(RemoveExecutor(executorId,
                   ExecutorProcessLost(
                     s"Executor heartbeat timed out after ${now - lastSeenMs} ms")))

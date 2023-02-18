@@ -22,6 +22,7 @@ import java.util.{Timer, TimerTask}
 import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
 import java.util.concurrent.atomic.AtomicLong
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, Buffer, HashMap, HashSet}
 import scala.util.Random
@@ -79,7 +80,10 @@ private[spark] class TaskSchedulerImpl(
     val sc: SparkContext,
     val maxTaskFailures: Int,
     isLocal: Boolean = false,
-    clock: Clock = new SystemClock)
+    clock: Clock = new SystemClock,
+    id: Option[Int] = None,
+    healthTrackerFactory: (SparkContext, Option[ExecutorAllocationClient]) =>
+      HealthTracker = HealthTracker(_, _))
   extends TaskScheduler with Logging {
 
   import TaskSchedulerImpl._
@@ -90,7 +94,13 @@ private[spark] class TaskSchedulerImpl(
 
   // Lazily initializing healthTrackerOpt to avoid getting empty ExecutorAllocationClient,
   // because ExecutorAllocationClient is created after this TaskSchedulerImpl.
-  private[scheduler] lazy val healthTrackerOpt = maybeCreateHealthTracker(sc)
+  private[scheduler] lazy val healthTrackerOpt = {
+    if (id.isEmpty) { // create health tracker only for main task scheduler
+      maybeCreateHealthTracker(sc, healthTrackerFactory)
+    } else {
+      None
+    }
+  }
 
   val conf = sc.conf
 
@@ -111,6 +121,8 @@ private[spark] class TaskSchedulerImpl(
   // CPUs to request per task
   val CPUS_PER_TASK = conf.get(config.CPUS_PER_TASK)
 
+  private[scheduler] val lock = ThreadUtils.readWriteLock()
+
   // TaskSetManagers are not thread safe, so any access to one should be synchronized
   // on this class.  Protected by `this`
   private val taskSetsByStageIdAndAttempt = new HashMap[Int, HashMap[Int, TaskSetManager]]
@@ -122,7 +134,8 @@ private[spark] class TaskSchedulerImpl(
   private val legacyLocalityWaitReset = conf.get(LEGACY_LOCALITY_WAIT_RESET)
 
   // Protected by `this`
-  private[scheduler] val taskIdToTaskSetManager = new ConcurrentHashMap[Long, TaskSetManager]
+  private[scheduler] val taskIdToTaskSetManager =
+    new ConcurrentHashMap[Long, TaskSetManager].asScala
   // Protected by `this`
   val taskIdToExecutorId = new HashMap[Long, String]
 
@@ -130,18 +143,29 @@ private[spark] class TaskSchedulerImpl(
   @volatile private var hasLaunchedTask = false
   private val starvationTimer = new Timer(true)
 
-  // Incrementing task IDs
-  val nextTaskId = new AtomicLong(0)
-
   // IDs of the tasks running on each executor
-  private val executorIdToRunningTaskIds = new HashMap[String, HashSet[Long]]
+  protected val executorIdToRunningTaskIds = new HashMap[String, HashSet[Long]]
 
   // We add executors here when we first get decommission notification for them. Executors can
   // continue to run even after being asked to decommission, but they will eventually exit.
   val executorsPendingDecommission = new HashMap[String, ExecutorDecommissionState]
 
-  def runningTasksByExecutors: Map[String, Int] = synchronized {
-    executorIdToRunningTaskIds.toMap.mapValues(_.size).toMap
+  def runningTasksByExecutors: Map[String, Int] = lock.read {
+    executorIdToRunningTaskIds.toMap.mapValues(_.size)
+  }
+
+  def busyExecutors: Set[String] = lock.read {
+    var set = Set[String]()
+
+    executorIdToRunningTaskIds
+      .foreach {
+        case (a, b) =>
+          if (b.nonEmpty) {
+            set += a
+          }
+      }
+
+    set
   }
 
   // The set of executors we have on each host; this is used to compute hostsAlive, which
@@ -174,10 +198,12 @@ private[spark] class TaskSchedulerImpl(
         throw new SparkException(s"Unrecognized $SCHEDULER_MODE_PROPERTY: $schedulingModeConf")
     }
 
-  val rootPool: Pool = new Pool("", schedulingMode, 0, 0)
+  val rootPool: Pool = new Pool(
+    id.map(i => s"task-scheduler-impl-pool-$i").getOrElse(""),
+    schedulingMode, 0, 0)
 
   // This is a var so that we can reset it for testing purposes.
-  private[spark] var taskResultGetter = new TaskResultGetter(sc.env, this)
+  private[spark] var taskResultGetter = new TaskResultGetter(sc.env, this, id)
 
   private lazy val barrierSyncTimeout = conf.get(config.BARRIER_SYNC_TIMEOUT)
 
@@ -235,7 +261,7 @@ private[spark] class TaskSchedulerImpl(
     val tasks = taskSet.tasks
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks "
       + "resource profile " + taskSet.resourceProfileId)
-    this.synchronized {
+    lock.write {
       val manager = createTaskSetManager(taskSet, maxTaskFailures)
       val stage = taskSet.stageId
       val stageTaskSets =
@@ -260,7 +286,7 @@ private[spark] class TaskSchedulerImpl(
         starvationTimer.scheduleAtFixedRate(new TimerTask() {
           override def run(): Unit = {
             if (!hasLaunchedTask) {
-              logWarning("Initial job has not accepted any resources; " +
+              logWarning(s"Initial job(${taskSet.priority}) has not accepted any resources; " +
                 "check your cluster UI to ensure that workers are registered " +
                 "and have sufficient resources")
             } else {
@@ -281,7 +307,7 @@ private[spark] class TaskSchedulerImpl(
     new TaskSetManager(this, taskSet, maxTaskFailures, healthTrackerOpt, clock)
   }
 
-  override def cancelTasks(stageId: Int, interruptThread: Boolean): Unit = synchronized {
+  override def cancelTasks(stageId: Int, interruptThread: Boolean): Unit = lock.write {
     logInfo("Cancelling stage " + stageId)
     // Kill all running tasks for the stage.
     killAllTaskAttempts(stageId, interruptThread, reason = "Stage cancelled")
@@ -297,7 +323,7 @@ private[spark] class TaskSchedulerImpl(
   override def killTaskAttempt(
       taskId: Long,
       interruptThread: Boolean,
-      reason: String): Boolean = synchronized {
+      reason: String): Boolean = lock.read {
     logInfo(s"Killing task $taskId: $reason")
     val execId = taskIdToExecutorId.get(taskId)
     if (execId.isDefined) {
@@ -312,7 +338,7 @@ private[spark] class TaskSchedulerImpl(
   override def killAllTaskAttempts(
       stageId: Int,
       interruptThread: Boolean,
-      reason: String): Unit = synchronized {
+      reason: String): Unit = lock.read {
     logInfo(s"Killing all running tasks in stage $stageId: $reason")
     taskSetsByStageIdAndAttempt.get(stageId).foreach { attempts =>
       attempts.foreach { case (_, tsm) =>
@@ -339,7 +365,7 @@ private[spark] class TaskSchedulerImpl(
    * given TaskSetManager have completed, so state associated with the TaskSetManager should be
    * cleaned up.
    */
-  def taskSetFinished(manager: TaskSetManager): Unit = synchronized {
+  def taskSetFinished(manager: TaskSetManager): Unit = lock.write {
     taskSetsByStageIdAndAttempt.get(manager.taskSet.stageId).foreach { taskSetsForStage =>
       taskSetsForStage -= manager.taskSet.stageAttemptId
       if (taskSetsForStage.isEmpty) {
@@ -376,11 +402,17 @@ private[spark] class TaskSchedulerImpl(
       tasks: IndexedSeq[ArrayBuffer[TaskDescription]],
       addressesWithDescs: ArrayBuffer[(String, TaskDescription)])
     : (Boolean, Option[TaskLocality]) = {
+    logDebug(s"resourceOfferSingleTaskSet taskSet=${taskSet.name} " +
+      s"maxLocality=$maxLocality offers=${shuffledOffers.size} " +
+      s"cpu=${availableCpus.mkString(",")} " +
+      s"availableResources=${availableResources.mkString(",")} " +
+      s"tasks=${tasks.size} addressesWithDescs=${addressesWithDescs.mkString(",")}")
+
     var noDelayScheduleRejects = true
     var minLaunchedLocality: Option[TaskLocality] = None
     // nodes and executors that are excluded for the entire application have already been
     // filtered out by this point
-    for (i <- 0 until shuffledOffers.size) {
+    for (i <- shuffledOffers.indices) {
       val execId = shuffledOffers(i).executorId
       val host = shuffledOffers(i).host
       val taskSetRpID = taskSet.taskSet.resourceProfileId
@@ -396,6 +428,7 @@ private[spark] class TaskSchedulerImpl(
             val (taskDescOption, didReject) =
               taskSet.resourceOffer(execId, host, maxLocality, taskResAssignments)
             noDelayScheduleRejects &= !didReject
+
             for (task <- taskDescOption) {
               tasks(i) += task
               val tid = task.taskId
@@ -427,6 +460,9 @@ private[spark] class TaskSchedulerImpl(
               return (noDelayScheduleRejects, minLaunchedLocality)
           }
         }
+      } else {
+        logDebug(s"resourceOfferSingleTaskSet else " +
+          s"$taskSetRpID != ${shuffledOffers(i).resourceProfileId}")
       }
     }
     (noDelayScheduleRejects, minLaunchedLocality)
@@ -491,115 +527,125 @@ private[spark] class TaskSchedulerImpl(
    */
   def resourceOffers(
       offers: IndexedSeq[WorkerOffer],
-      isAllFreeResources: Boolean = true): Seq[Seq[TaskDescription]] = synchronized {
-    // Mark each worker as alive and remember its hostname
-    // Also track if new executor is added
-    var newExecAvail = false
-    for (o <- offers) {
-      if (!hostToExecutors.contains(o.host)) {
-        hostToExecutors(o.host) = new HashSet[String]()
-      }
-      if (!executorIdToRunningTaskIds.contains(o.executorId)) {
-        hostToExecutors(o.host) += o.executorId
-        executorAdded(o.executorId, o.host)
-        executorIdToHost(o.executorId) = o.host
-        executorIdToRunningTaskIds(o.executorId) = HashSet[Long]()
-        newExecAvail = true
-      }
-    }
-    val hosts = offers.map(_.host).distinct
-    for ((host, Some(rack)) <- hosts.zip(getRacksForHosts(hosts))) {
-      hostsByRack.getOrElseUpdate(rack, new HashSet[String]()) += host
-    }
-
-    // Before making any offers, include any nodes whose expireOnFailure timeout has expired. Do
-    // this here to avoid a separate thread and added synchronization overhead, and also because
-    // updating the excluded executors and nodes is only relevant when task offers are being made.
-    healthTrackerOpt.foreach(_.applyExcludeOnFailureTimeout())
-
-    val filteredOffers = healthTrackerOpt.map { healthTracker =>
-      offers.filter { offer =>
-        !healthTracker.isNodeExcluded(offer.host) &&
-          !healthTracker.isExecutorExcluded(offer.executorId)
-      }
-    }.getOrElse(offers)
-
-    val shuffledOffers = shuffleOffers(filteredOffers)
-    // Build a list of tasks to assign to each worker.
-    // Note the size estimate here might be off with different ResourceProfiles but should be
-    // close estimate
-    val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores / CPUS_PER_TASK))
-    val availableResources = shuffledOffers.map(_.resources).toArray
-    val availableCpus = shuffledOffers.map(o => o.cores).toArray
-    val resourceProfileIds = shuffledOffers.map(o => o.resourceProfileId).toArray
-    val sortedTaskSets = rootPool.getSortedTaskSetQueue
-    for (taskSet <- sortedTaskSets) {
-      logDebug("parentName: %s, name: %s, runningTasks: %s".format(
-        taskSet.parent.name, taskSet.name, taskSet.runningTasks))
-      if (newExecAvail) {
-        taskSet.executorAdded()
-      }
-    }
-
-    // Take each TaskSet in our scheduling order, and then offer it to each node in increasing order
-    // of locality levels so that it gets a chance to launch local tasks on all of them.
-    // NOTE: the preferredLocality order: PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
-    for (taskSet <- sortedTaskSets) {
-      // we only need to calculate available slots if using barrier scheduling, otherwise the
-      // value is -1
-      val numBarrierSlotsAvailable = if (taskSet.isBarrier) {
-        val rpId = taskSet.taskSet.resourceProfileId
-        val availableResourcesAmount = availableResources.map { resourceMap =>
-          // available addresses already takes into account if there are fractional
-          // task resource requests
-          resourceMap.map { case (name, addresses) => (name, addresses.length) }
+      isAllFreeResources: Boolean = true): Seq[Seq[TaskDescription]] = {
+    lock.write {
+      // Mark each worker as alive and remember its hostname
+      // Also track if new executor is added
+      var newExecAvail = false
+      for (o <- offers) {
+        if (!hostToExecutors.contains(o.host)) {
+          hostToExecutors(o.host) = new HashSet[String]()
         }
-        calculateAvailableSlots(this, conf, rpId, resourceProfileIds, availableCpus,
-          availableResourcesAmount)
-      } else {
-        -1
-      }
-      // Skip the barrier taskSet if the available slots are less than the number of pending tasks.
-      if (taskSet.isBarrier && numBarrierSlotsAvailable < taskSet.numTasks) {
-        // Skip the launch process.
-        // TODO SPARK-24819 If the job requires more slots than available (both busy and free
-        // slots), fail the job on submit.
-        logInfo(s"Skip current round of resource offers for barrier stage ${taskSet.stageId} " +
-          s"because the barrier taskSet requires ${taskSet.numTasks} slots, while the total " +
-          s"number of available slots is $numBarrierSlotsAvailable.")
-      } else {
-        var launchedAnyTask = false
-        var noDelaySchedulingRejects = true
-        var globalMinLocality: Option[TaskLocality] = None
-        // Record all the executor IDs assigned barrier tasks on.
-        val addressesWithDescs = ArrayBuffer[(String, TaskDescription)]()
-        for (currentMaxLocality <- taskSet.myLocalityLevels) {
-          var launchedTaskAtCurrentMaxLocality = false
-          do {
-            val (noDelayScheduleReject, minLocality) = resourceOfferSingleTaskSet(
-              taskSet, currentMaxLocality, shuffledOffers, availableCpus,
-              availableResources, tasks, addressesWithDescs)
-            launchedTaskAtCurrentMaxLocality = minLocality.isDefined
-            launchedAnyTask |= launchedTaskAtCurrentMaxLocality
-            noDelaySchedulingRejects &= noDelayScheduleReject
-            globalMinLocality = minTaskLocality(globalMinLocality, minLocality)
-          } while (launchedTaskAtCurrentMaxLocality)
+        if (!executorIdToRunningTaskIds.contains(o.executorId)) {
+          hostToExecutors(o.host) += o.executorId
+          executorAdded(o.executorId, o.host)
+          executorIdToHost(o.executorId) = o.host
+          executorIdToRunningTaskIds(o.executorId) = HashSet[Long]()
+          newExecAvail = true
+        } else {
+          logDebug(s"resourceOffers offers=${offers.size} isAll=$isAllFreeResources" +
+            s" else ${o.executorId}")
         }
+      }
+      val hosts = offers.map(_.host).distinct
+      for ((host, Some(rack)) <- hosts.zip(getRacksForHosts(hosts))) {
+        hostsByRack.getOrElseUpdate(rack, new HashSet[String]()) += host
+      }
 
-        if (!legacyLocalityWaitReset) {
-          if (noDelaySchedulingRejects) {
-            if (launchedAnyTask &&
-              (isAllFreeResources || noRejectsSinceLastReset.getOrElse(taskSet.taskSet, true))) {
-              taskSet.resetDelayScheduleTimer(globalMinLocality)
-              noRejectsSinceLastReset.update(taskSet.taskSet, true)
-            }
-          } else {
-            noRejectsSinceLastReset.update(taskSet.taskSet, false)
+      // Before making any offers, include any nodes whose expireOnFailure timeout has expired. Do
+      // this here to avoid a separate thread and added synchronization overhead, and also because
+      // updating the excluded executors and nodes is only relevant when task offers are being made.
+      healthTrackerOpt.foreach(_.applyExcludeOnFailureTimeout())
+
+      val filteredOffers = healthTrackerOpt.map { healthTracker =>
+        offers.filter { offer =>
+          !healthTracker.isNodeExcluded(offer.host) &&
+            !healthTracker.isExecutorExcluded(offer.executorId)
+        }
+      }.getOrElse(offers)
+
+      val shuffledOffers = shuffleOffers(filteredOffers)
+      // Build a list of tasks to assign to each worker.
+      // Note the size estimate here might be off with different ResourceProfiles but should be
+      // close estimate
+      val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores / CPUS_PER_TASK))
+      val availableResources = shuffledOffers.map(_.resources).toArray
+      val availableCpus = shuffledOffers.map(o => o.cores).toArray
+      val resourceProfileIds = shuffledOffers.map(o => o.resourceProfileId).toArray
+      val sortedTaskSets = rootPool.getSortedTaskSetQueue
+
+      if (sortedTaskSets.nonEmpty) {
+        for (taskSet <- sortedTaskSets) {
+          logDebug("parentName: %s, name: %s, runningTasks: %s".format(
+            taskSet.parent.name, taskSet.name, taskSet.runningTasks))
+          if (newExecAvail) {
+            taskSet.executorAdded()
           }
         }
+      }
 
-        if (!launchedAnyTask) {
-          taskSet.getCompletelyExcludedTaskIfAny(hostToExecutors).foreach { taskIndex =>
+      // Take each TaskSet in our scheduling order,
+      // and then offer it to each node in increasing order
+      // of locality levels so that it gets a chance to launch local tasks on all of them.
+      // NOTE: the preferredLocality order: PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
+      for (taskSet <- sortedTaskSets) {
+        // we only need to calculate available slots if using barrier scheduling, otherwise the
+        // value is -1
+        val numBarrierSlotsAvailable = if (taskSet.isBarrier) {
+          val rpId = taskSet.taskSet.resourceProfileId
+          val availableResourcesAmount = availableResources.map { resourceMap =>
+            // available addresses already takes into account if there are fractional
+            // task resource requests
+            resourceMap.map { case (name, addresses) => (name, addresses.length) }
+          }
+          TaskScheduler.calculateAvailableSlots(sc, rpId, resourceProfileIds, availableCpus,
+            availableResourcesAmount)
+        } else {
+          -1
+        }
+        // Skip the barrier taskSet if the available slots
+        // are less than the number of pending tasks.
+        if (taskSet.isBarrier && numBarrierSlotsAvailable < taskSet.numTasks) {
+          // Skip the launch process.
+          // TODO SPARK-24819 If the job requires more slots than available (both busy and free
+          // slots), fail the job on submit.
+          logInfo(s"Skip current round of resource offers for barrier stage ${taskSet.stageId} " +
+            s"because the barrier taskSet requires ${taskSet.numTasks} slots, while the total " +
+            s"number of available slots is $numBarrierSlotsAvailable.")
+        } else {
+          var launchedAnyTask = false
+          var noDelaySchedulingRejects = true
+          var globalMinLocality: Option[TaskLocality] = None
+          // Record all the executor IDs assigned barrier tasks on.
+          val addressesWithDescs = ArrayBuffer[(String, TaskDescription)]()
+
+          for (currentMaxLocality <- taskSet.myLocalityLevels) {
+            var launchedTaskAtCurrentMaxLocality = false
+            do {
+              val (noDelayScheduleReject, minLocality) = resourceOfferSingleTaskSet(
+                taskSet, currentMaxLocality, shuffledOffers, availableCpus,
+                availableResources, tasks, addressesWithDescs)
+              launchedTaskAtCurrentMaxLocality = minLocality.isDefined
+              launchedAnyTask |= launchedTaskAtCurrentMaxLocality
+              noDelaySchedulingRejects &= noDelayScheduleReject
+              globalMinLocality = minTaskLocality(globalMinLocality, minLocality)
+            } while (launchedTaskAtCurrentMaxLocality)
+          }
+
+          if (!legacyLocalityWaitReset) {
+            if (noDelaySchedulingRejects) {
+              if (launchedAnyTask &&
+                (isAllFreeResources || noRejectsSinceLastReset.getOrElse(taskSet.taskSet, true))) {
+                taskSet.resetDelayScheduleTimer(globalMinLocality)
+                noRejectsSinceLastReset.update(taskSet.taskSet, true)
+              }
+            } else {
+              noRejectsSinceLastReset.update(taskSet.taskSet, false)
+            }
+          }
+
+          if (!launchedAnyTask) {
+            taskSet.getCompletelyExcludedTaskIfAny(hostToExecutors).foreach { taskIndex =>
               // If the taskSet is unschedulable we try to find an existing idle excluded
               // executor and kill the idle executor and kick off an abortTimer which if it doesn't
               // schedule a task within the the timeout will abort the taskSet if we were unable to
@@ -641,65 +687,66 @@ private[spark] class TaskSchedulerImpl(
                     taskSet.abortSinceCompletelyExcludedOnFailure(taskIndex)
                   }
               }
-          }
-        } else {
-          // We want to defer killing any taskSets as long as we have a non excluded executor
-          // which can be used to schedule a task from any active taskSets. This ensures that the
-          // job can make progress.
-          // Note: It is theoretically possible that a taskSet never gets scheduled on a
-          // non-excluded executor and the abort timer doesn't kick in because of a constant
-          // submission of new TaskSets. See the PR for more details.
-          if (unschedulableTaskSetToExpiryTime.nonEmpty) {
-            logInfo("Clearing the expiry times for all unschedulable taskSets as a task was " +
-              "recently scheduled.")
-            // Notify ExecutorAllocationManager as well as other subscribers that a task now
-            // recently becomes schedulable
-            dagScheduler.unschedulableTaskSetRemoved(taskSet.taskSet.stageId,
-              taskSet.taskSet.stageAttemptId)
-            unschedulableTaskSetToExpiryTime.clear()
-          }
-        }
-
-        if (launchedAnyTask && taskSet.isBarrier) {
-          // Check whether the barrier tasks are partially launched.
-          // TODO SPARK-24818 handle the assert failure case (that can happen when some locality
-          // requirements are not fulfilled, and we should revert the launched tasks).
-          if (addressesWithDescs.size != taskSet.numTasks) {
-            val errorMsg =
-              s"Fail resource offers for barrier stage ${taskSet.stageId} because only " +
-                s"${addressesWithDescs.size} out of a total number of ${taskSet.numTasks}" +
-                s" tasks got resource offers. This happens because barrier execution currently " +
-                s"does not work gracefully with delay scheduling. We highly recommend you to " +
-                s"disable delay scheduling by setting spark.locality.wait=0 as a workaround if " +
-                s"you see this error frequently."
-            logWarning(errorMsg)
-            taskSet.abort(errorMsg)
-            throw new SparkException(errorMsg)
+            }
+          } else {
+            // We want to defer killing any taskSets as long as we have a non excluded executor
+            // which can be used to schedule a task from any active taskSets. This ensures that the
+            // job can make progress.
+            // Note: It is theoretically possible that a taskSet never gets scheduled on a
+            // non-excluded executor and the abort timer doesn't kick in because of a constant
+            // submission of new TaskSets. See the PR for more details.
+            if (unschedulableTaskSetToExpiryTime.nonEmpty) {
+              logInfo("Clearing the expiry times for all unschedulable taskSets as a task was " +
+                "recently scheduled.")
+              // Notify ExecutorAllocationManager as well as other subscribers that a task now
+              // recently becomes schedulable
+              dagScheduler.unschedulableTaskSetRemoved(taskSet.taskSet.stageId,
+                taskSet.taskSet.stageAttemptId)
+              unschedulableTaskSetToExpiryTime.clear()
+            }
           }
 
-          // materialize the barrier coordinator.
-          maybeInitBarrierCoordinator()
+          if (launchedAnyTask && taskSet.isBarrier) {
+            // Check whether the barrier tasks are partially launched.
+            // TODO SPARK-24818 handle the assert failure case (that can happen when some locality
+            // requirements are not fulfilled, and we should revert the launched tasks).
+            if (addressesWithDescs.size != taskSet.numTasks) {
+              val errorMsg =
+                s"Fail resource offers for barrier stage ${taskSet.stageId} because only " +
+                  s"${addressesWithDescs.size} out of a total number of ${taskSet.numTasks}" +
+                  s" tasks got resource offers. This happens because barrier execution currently " +
+                  s"does not work gracefully with delay scheduling. We highly recommend you to " +
+                  s"disable delay scheduling by setting spark.locality.wait=0 as a workaround if " +
+                  s"you see this error frequently."
+              logWarning(errorMsg)
+              taskSet.abort(errorMsg)
+              throw new SparkException(errorMsg)
+            }
 
-          // Update the taskInfos into all the barrier task properties.
-          val addressesStr = addressesWithDescs
-            // Addresses ordered by partitionId
-            .sortBy(_._2.partitionId)
-            .map(_._1)
-            .mkString(",")
-          addressesWithDescs.foreach(_._2.properties.setProperty("addresses", addressesStr))
+            // materialize the barrier coordinator.
+            maybeInitBarrierCoordinator()
 
-          logInfo(s"Successfully scheduled all the ${addressesWithDescs.size} tasks for barrier " +
-            s"stage ${taskSet.stageId}.")
+            // Update the taskInfos into all the barrier task properties.
+            val addressesStr = addressesWithDescs
+              // Addresses ordered by partitionId
+              .sortBy(_._2.partitionId)
+              .map(_._1)
+              .mkString(",")
+            addressesWithDescs.foreach(_._2.properties.setProperty("addresses", addressesStr))
+
+            logInfo(s"Successfully scheduled all the ${addressesWithDescs.size} tasks" +
+              s" for barrier stage ${taskSet.stageId}.")
+          }
         }
       }
-    }
 
-    // TODO SPARK-24823 Cancel a job that contains barrier stage(s) if the barrier tasks don't get
-    // launched within a configured time.
-    if (tasks.nonEmpty) {
-      hasLaunchedTask = true
+      // TODO SPARK-24823 Cancel a job that contains barrier stage(s) if the barrier tasks don't get
+      // launched within a configured time.
+      if (tasks.nonEmpty) {
+        hasLaunchedTask = true
+      }
+      return tasks.map(_.toSeq)
     }
-    return tasks.map(_.toSeq)
   }
 
   private def updateUnschedulableTaskSetTimeoutAndStartAbortTimer(
@@ -717,7 +764,7 @@ private[spark] class TaskSchedulerImpl(
       taskSet: TaskSetManager,
       taskIndex: Int): TimerTask = {
     new TimerTask() {
-      override def run(): Unit = TaskSchedulerImpl.this.synchronized {
+      override def run(): Unit = TaskSchedulerImpl.this.lock.write {
         if (unschedulableTaskSetToExpiryTime.contains(taskSet) &&
             unschedulableTaskSetToExpiryTime(taskSet) <= clock.getTimeMillis()) {
           logInfo("Cannot schedule any task because all executors excluded due to failures. " +
@@ -741,9 +788,11 @@ private[spark] class TaskSchedulerImpl(
   def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer): Unit = {
     var failedExecutor: Option[String] = None
     var reason: Option[ExecutorLossReason] = None
-    synchronized {
+    lock.write {
+      val maybeManager = taskIdToTaskSetManager.get(tid)
+
       try {
-        Option(taskIdToTaskSetManager.get(tid)) match {
+        maybeManager match {
           case Some(taskSet) =>
             if (state == TaskState.LOST) {
               // TaskState.LOST is only used by the deprecated Mesos fine-grained scheduling mode,
@@ -804,7 +853,7 @@ private[spark] class TaskSchedulerImpl(
     val accumUpdatesWithTaskIds: Array[(Long, Int, Int, Seq[AccumulableInfo])] = {
       accumUpdates.flatMap { case (id, updates) =>
         val accInfos = updates.map(acc => acc.toInfo(Some(acc.value), None))
-        Option(taskIdToTaskSetManager.get(id)).map { taskSetMgr =>
+        taskIdToTaskSetManager.get(id).map { taskSetMgr =>
           (id, taskSetMgr.stageId, taskSetMgr.taskSet.stageAttemptId, accInfos)
         }
       }
@@ -813,14 +862,14 @@ private[spark] class TaskSchedulerImpl(
       executorUpdates)
   }
 
-  def handleTaskGettingResult(taskSetManager: TaskSetManager, tid: Long): Unit = synchronized {
+  def handleTaskGettingResult(taskSetManager: TaskSetManager, tid: Long): Unit = lock.write {
     taskSetManager.handleTaskGettingResult(tid)
   }
 
   def handleSuccessfulTask(
       taskSetManager: TaskSetManager,
       tid: Long,
-      taskResult: DirectTaskResult[_]): Unit = synchronized {
+      taskResult: DirectTaskResult[_]): Unit = lock.write {
     taskSetManager.handleSuccessfulTask(tid, taskResult)
   }
 
@@ -828,7 +877,7 @@ private[spark] class TaskSchedulerImpl(
       taskSetManager: TaskSetManager,
       tid: Long,
       taskState: TaskState,
-      reason: TaskFailedReason): Unit = synchronized {
+      reason: TaskFailedReason): Unit = lock.write {
     taskSetManager.handleFailedTask(tid, taskState, reason)
     if (!taskSetManager.isZombie && !taskSetManager.someAttemptSucceeded(tid)) {
       // Need to revive offers again now that the task set manager state has been updated to
@@ -846,14 +895,14 @@ private[spark] class TaskSchedulerImpl(
    * means that a task completion from an earlier zombie attempt can lead to the entire stage
    * getting marked as successful.
    */
-  private[scheduler] def handlePartitionCompleted(stageId: Int, partitionId: Int) = synchronized {
+  private[scheduler] def handlePartitionCompleted(stageId: Int, partitionId: Int) = lock.write {
     taskSetsByStageIdAndAttempt.get(stageId).foreach(_.values.filter(!_.isZombie).foreach { tsm =>
       tsm.markPartitionCompleted(partitionId)
     })
   }
 
   def error(message: String): Unit = {
-    synchronized {
+    lock.write {
       if (taskSetsByStageIdAndAttempt.nonEmpty) {
         // Have each task set throw a SparkException with the error
         for {
@@ -895,7 +944,7 @@ private[spark] class TaskSchedulerImpl(
   // Check for speculatable tasks in all our active jobs.
   def checkSpeculatableTasks(): Unit = {
     var shouldRevive = false
-    synchronized {
+    lock.write {
       shouldRevive = rootPool.checkSpeculatableTasks(MIN_TIME_TO_SPECULATION)
     }
     if (shouldRevive) {
@@ -905,7 +954,7 @@ private[spark] class TaskSchedulerImpl(
 
   override def executorDecommission(
       executorId: String, decommissionInfo: ExecutorDecommissionInfo): Unit = {
-    synchronized {
+    lock.write {
       // Don't bother noting decommissioning for executors that we don't know about
       if (executorIdToHost.contains(executorId)) {
         executorsPendingDecommission(executorId) =
@@ -917,14 +966,14 @@ private[spark] class TaskSchedulerImpl(
   }
 
   override def getExecutorDecommissionState(executorId: String)
-    : Option[ExecutorDecommissionState] = synchronized {
+    : Option[ExecutorDecommissionState] = lock.read {
     executorsPendingDecommission.get(executorId)
   }
 
   override def executorLost(executorId: String, reason: ExecutorLossReason): Unit = {
     var failedExecutor: Option[String] = None
 
-    synchronized {
+    lock.write {
       if (executorIdToRunningTaskIds.contains(executorId)) {
         val hostPort = executorIdToHost(executorId)
         logExecutorLoss(executorId, hostPort, reason)
@@ -1020,29 +1069,81 @@ private[spark] class TaskSchedulerImpl(
     healthTrackerOpt.foreach(_.handleRemovedExecutor(executorId))
   }
 
+  // called when all tasks were finished
+  override private[scheduler] def clearExecutors(
+    executorIds: Seq[String]): Seq[String] = {
+    if (executorIds.nonEmpty) {
+      lock.write {
+        val freeExecutors =
+          executorIds.filterNot(execId =>
+            executorIdToRunningTaskIds.get(execId)
+              .exists(_.nonEmpty))
+
+        logDebug(s"clearExecutors[${freeExecutors.size}]=${freeExecutors.sorted.mkString(",")}" +
+          s" requested[${executorIds.size}]=${executorIds.sorted.mkString(",")}" +
+          s" existing[${executorIdToHost.size}]=" +
+          s"${executorIdToHost.keySet.toSeq.sorted.mkString(",")}")
+
+        freeExecutors.flatMap { executorId =>
+          executorIdToRunningTaskIds
+            .remove(executorId)
+            .filter(_.nonEmpty)
+            .foreach { taskIds =>
+              logDebug(s"Removing executor with running tasks for executorId=$executorId " +
+                s"${taskIds.mkString("[", ",", "]")}")
+              taskIds.foreach(cleanupTaskState)
+            }
+
+          executorIdToHost.get(executorId)
+            .map { host =>
+              val execs = hostToExecutors.getOrElse(host, new HashSet)
+              execs -= executorId
+              if (execs.isEmpty) {
+                hostToExecutors -= host
+                for (rack <- getRackForHost(host); hosts <- hostsByRack.get(rack)) {
+                  hosts -= host
+                  if (hosts.isEmpty) {
+                    hostsByRack -= rack
+                  }
+                }
+              }
+
+              executorsPendingDecommission.remove(executorId)
+              executorIdToHost -= executorId
+              healthTrackerOpt.foreach(_.handleRemovedExecutor(executorId))
+
+              executorId
+            }
+        }
+      }
+    } else {
+      Seq()
+    }
+  }
+
   def executorAdded(execId: String, host: String): Unit = {
     dagScheduler.executorAdded(execId, host)
   }
 
-  def getExecutorsAliveOnHost(host: String): Option[Set[String]] = synchronized {
+  def getExecutorsAliveOnHost(host: String): Option[Set[String]] = lock.read {
     hostToExecutors.get(host).map(_.filterNot(isExecutorDecommissioned)).map(_.toSet)
   }
 
-  def hasExecutorsAliveOnHost(host: String): Boolean = synchronized {
+  def hasExecutorsAliveOnHost(host: String): Boolean = lock.read {
     hostToExecutors.get(host)
       .exists(executors => executors.exists(e => !isExecutorDecommissioned(e)))
   }
 
-  def hasHostAliveOnRack(rack: String): Boolean = synchronized {
+  def hasHostAliveOnRack(rack: String): Boolean = lock.read {
     hostsByRack.get(rack)
       .exists(hosts => hosts.exists(h => !isHostDecommissioned(h)))
   }
 
-  def isExecutorAlive(execId: String): Boolean = synchronized {
+  def isExecutorAlive(execId: String): Boolean = lock.read {
     executorIdToRunningTaskIds.contains(execId) && !isExecutorDecommissioned(execId)
   }
 
-  def isExecutorBusy(execId: String): Boolean = synchronized {
+  def isExecutorBusy(execId: String): Boolean = lock.read {
     executorIdToRunningTaskIds.get(execId).exists(_.nonEmpty)
   }
 
@@ -1095,9 +1196,7 @@ private[spark] class TaskSchedulerImpl(
         // For example: the master removes the application for some reason
         throw new IllegalStateException("Spark context stopped while waiting for backend")
       }
-      synchronized {
-        this.wait(100)
-      }
+      lock.await(100)
     }
   }
 
@@ -1105,10 +1204,16 @@ private[spark] class TaskSchedulerImpl(
 
   override def applicationAttemptId(): Option[String] = backend.applicationAttemptId()
 
+  override def taskSetManagerByTaskId(taskId: Long): Option[TaskSetManager] = {
+    taskIdToTaskSetManager.get(taskId)
+  }
+
+  override def writeLock[T](fn: => T): T = lock.write(fn)
+
   // exposed for testing
   private[scheduler] def taskSetManagerForAttempt(
       stageId: Int,
-      stageAttemptId: Int): Option[TaskSetManager] = synchronized {
+      stageAttemptId: Int): Option[TaskSetManager] = lock.read {
     for {
       attempts <- taskSetsByStageIdAndAttempt.get(stageId)
       manager <- attempts.get(stageAttemptId)
@@ -1119,66 +1224,12 @@ private[spark] class TaskSchedulerImpl(
 }
 
 
-private[spark] object TaskSchedulerImpl {
+private[spark] object TaskSchedulerImpl extends Logging {
 
   val SCHEDULER_MODE_PROPERTY = SCHEDULER_MODE.key
 
-  /**
-   * Calculate the max available task slots given the `availableCpus` and `availableResources`
-   * from a collection of ResourceProfiles. And only those ResourceProfiles who has the
-   * same id with the `rpId` can be used to calculate the task slots.
-   *
-   * @param scheduler the TaskSchedulerImpl instance
-   * @param conf SparkConf used to calculate the limiting resource and get the cpu amount per task
-   * @param rpId the target ResourceProfile id. Only those ResourceProfiles who has the same id
-   *             with it can be used to calculate the task slots.
-   * @param availableRPIds an Array of ids of the available ResourceProfiles from the executors.
-   * @param availableCpus an Array of the amount of available cpus from the executors.
-   * @param availableResources an Array of the resources map from the executors. In the resource
-   *                           map, it maps from the resource name to its amount.
-   * @return the number of max task slots
-   */
-  def calculateAvailableSlots(
-      scheduler: TaskSchedulerImpl,
-      conf: SparkConf,
-      rpId: Int,
-      availableRPIds: Array[Int],
-      availableCpus: Array[Int],
-      availableResources: Array[Map[String, Int]]): Int = {
-    val resourceProfile = scheduler.sc.resourceProfileManager.resourceProfileFromId(rpId)
-    val coresKnown = resourceProfile.isCoresLimitKnown
-    val (limitingResource, limitedByCpu) = {
-      val limiting = resourceProfile.limitingResource(conf)
-      // if limiting resource is empty then we have no other resources, so it has to be CPU
-      if (limiting == ResourceProfile.CPUS || limiting.isEmpty) {
-        (ResourceProfile.CPUS, true)
-      } else {
-        (limiting, false)
-      }
-    }
-    val cpusPerTask = ResourceProfile.getTaskCpusOrDefaultForProfile(resourceProfile, conf)
-    val taskLimit = resourceProfile.taskResources.get(limitingResource).map(_.amount).get
-
-    availableCpus.zip(availableResources).zip(availableRPIds)
-      .filter { case (_, id) => id == rpId }
-      .map { case ((cpu, resources), _) =>
-        val numTasksPerExecCores = cpu / cpusPerTask
-        if (limitedByCpu) {
-          numTasksPerExecCores
-        } else {
-          val availAddrs = resources.getOrElse(limitingResource, 0)
-          val resourceLimit = (availAddrs / taskLimit).toInt
-          // when executor cores config isn't set, we can't calculate the real limiting resource
-          // and number of tasks per executor ahead of time, so calculate it now based on what
-          // is available.
-          if (!coresKnown && numTasksPerExecCores <= resourceLimit) {
-            numTasksPerExecCores
-          } else {
-            resourceLimit
-          }
-        }
-      }.sum
-  }
+  // Incrementing task IDs
+  val nextTaskId = new AtomicLong(0)
 
   /**
    * Used to balance containers across hosts.
@@ -1221,13 +1272,16 @@ private[spark] object TaskSchedulerImpl {
     retval.toList
   }
 
-  private def maybeCreateHealthTracker(sc: SparkContext): Option[HealthTracker] = {
+  private def maybeCreateHealthTracker(
+     sc: SparkContext,
+     factory: (SparkContext, Option[ExecutorAllocationClient]) =>
+       HealthTracker): Option[HealthTracker] = {
     if (HealthTracker.isExcludeOnFailureEnabled(sc.conf)) {
       val executorAllocClient: Option[ExecutorAllocationClient] = sc.schedulerBackend match {
         case b: ExecutorAllocationClient => Some(b)
         case _ => None
       }
-      Some(new HealthTracker(sc, executorAllocClient))
+      Some(factory(sc, executorAllocClient))
     } else {
       None
     }

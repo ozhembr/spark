@@ -50,14 +50,14 @@ class ResourceProfile(
     val taskResources: Map[String, TaskResourceRequest]) extends Serializable with Logging {
 
   // _id is only a var for testing purposes
-  private var _id = ResourceProfile.getNextProfileId
+  @volatile private var _id = ResourceProfile.getNextProfileId
   // This is used for any resources that use fractional amounts, the key is the resource name
   // and the value is the number of tasks that can share a resource address. For example,
   // if the user says task gpu amount is 0.5, that results in 2 tasks per resource address.
-  private var _executorResourceSlotsPerAddr: Option[Map[String, Int]] = None
-  private var _limitingResource: Option[String] = None
-  private var _maxTasksPerExecutor: Option[Int] = None
-  private var _coresLimitKnown: Boolean = false
+  @volatile private var _executorResourceSlotsPerAddr: Option[Map[String, Int]] = None
+  @volatile private var _limitingResource: Option[String] = None
+  @volatile private var _maxTasksPerExecutor: Option[Int] = None
+  @volatile private var _coresLimitKnown: Boolean = false
 
   /**
    * A unique id of this ResourceProfile
@@ -87,7 +87,7 @@ class ResourceProfile(
   }
 
   private[spark] def getPySparkMemory: Option[Long] = {
-    executorResources.get(ResourceProfile.PYSPARK_MEM).map(_.amount.toLong)
+    executorResources.get(ResourceProfile.PYSPARK_MEM).map(_.amount)
   }
 
   /*
@@ -300,6 +300,7 @@ object ResourceProfile extends Logging {
   private var defaultProfileExecutorResources: Option[DefaultProfileExecutorResources] = None
 
   private[spark] def getNextProfileId: Int = nextProfileId.getAndIncrement()
+  private[spark] def lastProfileId: Int = nextProfileId.get() - 1
 
   private[spark] def getOrCreateDefaultProfile(conf: SparkConf): ResourceProfile = {
     DEFAULT_PROFILE_LOCK.synchronized {

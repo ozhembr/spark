@@ -19,6 +19,8 @@ package org.apache.spark.scheduler
 
 import java.util.Properties
 
+import scala.util.Try
+
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.{AccumulatorV2, CallSite}
@@ -31,6 +33,13 @@ import org.apache.spark.util.{AccumulatorV2, CallSite}
  */
 private[scheduler] sealed trait DAGSchedulerEvent
 
+private[scheduler] sealed trait SubmittedEvent extends DAGSchedulerEvent {
+  val jobId: Int
+  val callSite: CallSite
+  val listener: JobListener
+  val properties: Properties
+}
+
 /** A result-yielding job was submitted on a target RDD */
 private[scheduler] case class JobSubmitted(
     jobId: Int,
@@ -40,7 +49,7 @@ private[scheduler] case class JobSubmitted(
     callSite: CallSite,
     listener: JobListener,
     properties: Properties = null)
-  extends DAGSchedulerEvent
+  extends SubmittedEvent
 
 /** A map stage as submitted to run as a separate job */
 private[scheduler] case class MapStageSubmitted(
@@ -49,7 +58,15 @@ private[scheduler] case class MapStageSubmitted(
   callSite: CallSite,
   listener: JobListener,
   properties: Properties = null)
-  extends DAGSchedulerEvent
+  extends SubmittedEvent
+
+private[scheduler]
+case class StageReady(listener: JobListener, properties: Properties, stage: Stage)
+ extends DAGSchedulerEvent
+
+private[scheduler]
+case class StageFailed(exception: Throwable, submittedEvent: SubmittedEvent)
+ extends DAGSchedulerEvent
 
 private[scheduler] case class StageCancelled(
     stageId: Int,
@@ -64,6 +81,16 @@ private[scheduler] case class JobCancelled(
 private[scheduler] case class JobGroupCancelled(groupId: String) extends DAGSchedulerEvent
 
 private[scheduler] case object AllJobsCancelled extends DAGSchedulerEvent
+
+private[scheduler]
+case class MissingParentStages(requestedStage: Stage, missingParents: List[Stage])
+ extends DAGSchedulerEvent
+
+private[scheduler]
+case class StageTaskLocations(
+    stage: Stage,
+    partitionsToCompute: Seq[Int],
+    taskIdToLocations: Try[Map[Int, Seq[TaskLocation]]]) extends DAGSchedulerEvent
 
 private[scheduler]
 case class BeginEvent(task: Task[_], taskInfo: TaskInfo) extends DAGSchedulerEvent

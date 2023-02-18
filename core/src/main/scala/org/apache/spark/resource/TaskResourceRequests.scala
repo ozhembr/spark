@@ -34,12 +34,23 @@ import org.apache.spark.resource.ResourceProfile._
 @Since("3.1.0")
 class TaskResourceRequests() extends Serializable {
 
+  @volatile private var cpuRef: TaskResourceRequest = null
   private val _taskResources = new ConcurrentHashMap[String, TaskResourceRequest]()
 
   /**
    * Returns all the resource requests for the task.
    */
-  def requests: Map[String, TaskResourceRequest] = _taskResources.asScala.toMap
+  def requests: Map[String, TaskResourceRequest] = {
+    var map = _taskResources.asScala.toMap
+
+    val ref = cpuRef
+
+    if (ref != null) {
+      map += (CPUS -> ref)
+    }
+
+    map
+  }
 
   /**
    * (Java-specific) Returns all the resource requests for the task.
@@ -53,8 +64,8 @@ class TaskResourceRequests() extends Serializable {
    * @param amount Number of cpus to allocate per Task.
    */
   def cpus(amount: Int): this.type = {
-    val treq = new TaskResourceRequest(CPUS, amount)
-    _taskResources.put(CPUS, treq)
+    cpuRef = new TaskResourceRequest(CPUS, amount)
+    
     this
   }
 
@@ -78,7 +89,12 @@ class TaskResourceRequests() extends Serializable {
    * Add a certain [[TaskResourceRequest]] to the request set.
    */
   def addRequest(treq: TaskResourceRequest): this.type = {
-    _taskResources.put(treq.resourceName, treq)
+    treq.resourceName match {
+      case CPUS =>
+        cpuRef = treq
+      case _ =>
+        _taskResources.put(treq.resourceName, treq)
+    }
     this
   }
 

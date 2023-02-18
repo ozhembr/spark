@@ -101,15 +101,19 @@ private[spark] class LocalEndpoint(
  * Executor (created by the [[LocalSchedulerBackend]]) running locally.
  */
 private[spark] class LocalSchedulerBackend(
-    conf: SparkConf,
     scheduler: TaskSchedulerImpl,
     val totalCores: Int)
   extends SchedulerBackend with ExecutorBackend with Logging {
 
+  override def sc: SparkContext = scheduler.sc
+
+  override def taskScheduler: TaskScheduler = scheduler
+
+  override val driverEndpoint: RpcEndpointRef = null
+
   private val appId = "local-" + System.currentTimeMillis
   private var localEndpoint: RpcEndpointRef = null
   private val userClassPath = getUserClasspath(conf)
-  private val listenerBus = scheduler.sc.listenerBus
   private val launcherBackend = new LauncherBackend() {
     override def conf: SparkConf = LocalSchedulerBackend.this.conf
     override def onStopRequest(): Unit = stop(SparkAppHandle.State.KILLED)

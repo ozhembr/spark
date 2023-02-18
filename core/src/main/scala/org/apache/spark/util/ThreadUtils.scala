@@ -377,4 +377,6 @@ private[spark] object ThreadUtils {
       pool.shutdownNow()
     }
   }
+
+  def readWriteLock(): ReadWriteLock = new ReadWriteLock
 }

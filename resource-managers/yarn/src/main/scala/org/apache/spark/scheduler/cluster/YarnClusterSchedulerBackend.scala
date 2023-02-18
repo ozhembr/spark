@@ -19,13 +19,16 @@ package org.apache.spark.scheduler.cluster
 
 import org.apache.spark.SparkContext
 import org.apache.spark.deploy.yarn.ApplicationMaster
-import org.apache.spark.scheduler.TaskSchedulerImpl
+import org.apache.spark.scheduler.{TaskScheduler, TaskSchedulerImpl}
 import org.apache.spark.util.YarnContainerInfoHelper
 
 private[spark] class YarnClusterSchedulerBackend(
     scheduler: TaskSchedulerImpl,
-    sc: SparkContext)
-  extends YarnSchedulerBackend(scheduler, sc) {
+    sparkContext: SparkContext)
+  extends CoarseGrainedSchedulerBackend with YarnSchedulerBackend {
+  override def sc: SparkContext = sparkContext
+  override def taskScheduler: TaskScheduler = scheduler
+  override def id: Option[Int] = None
 
   override def start(): Unit = {
     val attemptId = ApplicationMaster.getAttemptId

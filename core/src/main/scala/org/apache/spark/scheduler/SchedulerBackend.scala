@@ -17,7 +17,15 @@
 
 package org.apache.spark.scheduler
 
+import java.util.concurrent.atomic.AtomicReference
+
+import scala.concurrent.Future
+
+import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.deploy.security.HadoopDelegationTokenManager
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef, RpcEnv}
 import org.apache.spark.storage.BlockManagerId
 
 /**
@@ -25,8 +33,47 @@ import org.apache.spark.storage.BlockManagerId
  * TaskSchedulerImpl. We assume a Mesos-like model where the application gets resource offers as
  * machines become available and can launch tasks on them.
  */
-private[spark] trait SchedulerBackend {
+private[spark] trait SchedulerBackend extends Logging {
   private val appId = "spark-application-" + System.currentTimeMillis
+
+  def sc: SparkContext
+  lazy val rpcEnv: RpcEnv = sc.env.rpcEnv
+  lazy val conf: SparkConf = sc.conf
+  lazy val listenerBus: LiveListenerBus = sc.listenerBus
+
+  // Spark configuration sent to executors. This is a lazy val so that subclasses of the
+  // scheduler can modify the SparkConf object before this view is created.
+  lazy val sparkProperties: Seq[(String, String)] = conf.getAll
+    .filter { case (k, _) => k.startsWith("spark.") }
+    .toSeq
+
+  // Submit tasks only after (registered resources / total expected resources)
+  // is equal to at least this value, that is double between 0 and 1.
+  def minRegisteredRatio: Double =
+    math.min(1, conf.get(config.SCHEDULER_MIN_REGISTERED_RESOURCES_RATIO).getOrElse(0.0))
+
+  val driverEndpoint: RpcEndpointRef
+
+  // The token manager used to create security tokens.
+  protected var delegationTokenManager: Option[HadoopDelegationTokenManager] = None
+
+  // Current set of delegation tokens to send to executors.
+  protected val delegationTokens = new AtomicReference[Array[Byte]]()
+
+  def taskScheduler: TaskScheduler
+
+  def reset(): Unit = {}
+
+  /**
+   * Create the delegation token manager to be used for the application. This method is called
+   * once during the start of the scheduler backend (so after the object has already been
+   * fully constructed), only if security is enabled in the Hadoop configuration.
+   */
+  protected def createTokenManager(): Option[HadoopDelegationTokenManager] = None
+
+  def currentDelegationTokens: Array[Byte] = delegationTokens.get()
+
+  def updateDelegationTokens(tokens: Array[Byte]): Unit = {}
 
   def start(): Unit
   def stop(): Unit
@@ -91,7 +138,7 @@ private[spark] trait SchedulerBackend {
    * @param rp ResourceProfile which to use to calculate max concurrent tasks.
    * @return The max number of tasks that can be concurrent launched currently.
    */
-  def maxNumConcurrentTasks(rp: ResourceProfile): Int
+  def maxNumConcurrentTasks(rp: ResourceProfile): Int = 0
 
   /**
    * Get the list of host locations for push based shuffle
@@ -105,4 +152,29 @@ private[spark] trait SchedulerBackend {
       numPartitions: Int,
       resourceProfileId: Int): Seq[BlockManagerId] = Nil
 
+  def requestTotalExecutors(
+      resourceProfileIdToNumExecutors: Map[Int, Int],
+      numLocalityAwareTasksPerResourceProfileId: Map[Int, Int],
+      hostToLocalTaskCount: Map[Int, Map[String, Int]]): Boolean = false
+
+  protected def doRequestTotalExecutors(
+      resourceProfileToTotalExecs: Map[ResourceProfile, Int],
+      numLocalityAwareTasksPerResourceProfileId: Map[Int, Int],
+      hostToLocalTaskCount: Map[Int, Map[String, Int]]): Future[Boolean] =
+    Future.successful(false)
+
+  private[scheduler] def disableExecutor(executorId: String): Boolean = false
+
+  protected def doKillExecutors(executorIds: Seq[String]): Future[Boolean] =
+    Future.successful(false)
+
+  def excludedNodes(): Set[String] = taskScheduler.excludedNodes()
+
+  def getTotalRegisteredExecutors(): Int = 0
+
+  def lastAllocatedExecutorId: Int = 0
+
+  def sufficientResourcesRegistered(): Boolean = false
+
+  def onDisconnectedExecutor(rpcAddress: RpcAddress, executorId: String): Unit = {}
 }

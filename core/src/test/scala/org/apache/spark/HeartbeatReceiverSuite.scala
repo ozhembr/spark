@@ -167,7 +167,7 @@ class HeartbeatReceiverSuite
     val fakeClusterManager = new FakeClusterManager(rpcEnv, conf)
     val fakeClusterManagerRef = rpcEnv.setupEndpoint("fake-cm", fakeClusterManager)
     val fakeSchedulerBackend =
-      new FakeSchedulerBackend(scheduler, rpcEnv, fakeClusterManagerRef, sc.resourceProfileManager)
+      new FakeSchedulerBackend(sc, scheduler, fakeClusterManagerRef, sc.resourceProfileManager)
     when(sc.schedulerBackend).thenReturn(fakeSchedulerBackend)
 
     // Register fake executors with our fake scheduler backend
@@ -299,16 +299,21 @@ private class FakeExecutorEndpoint(override val rpcEnv: RpcEnv) extends RpcEndpo
  * Dummy scheduler backend to simulate executor allocation requests to the cluster manager.
  */
 private class FakeSchedulerBackend(
+    override val sc: SparkContext,
     scheduler: TaskSchedulerImpl,
-    rpcEnv: RpcEnv,
     clusterManagerEndpoint: RpcEndpointRef,
     resourceProfileManager: ResourceProfileManager)
-  extends CoarseGrainedSchedulerBackend(scheduler, rpcEnv) {
+  extends CoarseGrainedSchedulerBackend {
+
+  def taskScheduler: TaskScheduler = scheduler
+  def id: Option[Int] = None
 
   def this() = this(null, null, null, null)
 
-  protected override def doRequestTotalExecutors(
-      resourceProfileToTotalExecs: Map[ResourceProfile, Int]): Future[Boolean] = {
+  override protected def doRequestTotalExecutors(
+      resourceProfileToTotalExecs: Map[ResourceProfile, Int],
+      numLocalityAwareTasksPerResourceProfileId: Map[Int, Int],
+      hostToLocalTaskCount: Map[Int, Map[String, Int]]): Future[Boolean] = {
     clusterManagerEndpoint.ask[Boolean](
       RequestExecutors(resourceProfileToTotalExecs, numLocalityAwareTasksPerResourceProfileId,
         rpHostToLocalTaskCount, Set.empty))

@@ -252,6 +252,8 @@ abstract class RDD[T: ClassTag](
   /** An Option holding our checkpoint RDD, if we are checkpointed */
   private def checkpointRDD: Option[CheckpointRDD[T]] = checkpointData.flatMap(_.checkpointRDD)
 
+  def hasDependencies: Boolean = dependencies_ != null
+
   /**
    * Get the list of dependencies of this RDD, taking into account whether the
    * RDD is checkpointed or not.

@@ -17,7 +17,11 @@
 
 package org.apache.spark.scheduler
 
-import scala.collection.mutable.HashSet
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+
+import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 import org.apache.spark.{MapOutputTrackerMaster, ShuffleDependency}
 import org.apache.spark.rdd.RDD
@@ -46,7 +50,8 @@ private[spark] class ShuffleMapStage(
     resourceProfileId: Int)
   extends Stage(id, rdd, numTasks, parents, firstJobId, callSite, resourceProfileId) {
 
-  private[this] var _mapStageJobs: List[ActiveJob] = Nil
+  private[this] val _mapStageJobs: mutable.Buffer[ActiveJob] =
+    new CopyOnWriteArrayList[ActiveJob]().asScala
 
   /**
    * Partitions that either haven't yet been computed, or that were computed on an executor
@@ -57,7 +62,7 @@ private[spark] class ShuffleMapStage(
    * tasks in the TaskSetManager for the active attempt for the stage (the partitions stored here
    * will always be a subset of the partitions that the TaskSetManager thinks are pending).
    */
-  val pendingPartitions = new HashSet[Int]
+  val pendingPartitions: mutable.Set[Int] = ConcurrentHashMap.newKeySet[Int]().asScala
 
   override def toString: String = "ShuffleMapStage " + id
 
@@ -69,12 +74,12 @@ private[spark] class ShuffleMapStage(
 
   /** Adds the job to the active job list. */
   def addActiveJob(job: ActiveJob): Unit = {
-    _mapStageJobs = job :: _mapStageJobs
+    _mapStageJobs += job
   }
 
   /** Removes the job from the active job list. */
   def removeActiveJob(job: ActiveJob): Unit = {
-    _mapStageJobs = _mapStageJobs.filter(_ != job)
+    _mapStageJobs -= job
   }
 
   /**

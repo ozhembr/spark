@@ -48,11 +48,25 @@ import org.apache.spark.util.{Clock, SystemClock, Utils}
  * called by multiple threads, callers must already have a lock on the TaskSchedulerImpl.  The
  * one exception is [[excludedNodeList()]], which can be called without holding a lock.
  */
-private[scheduler] class HealthTracker (
-    private val listenerBus: LiveListenerBus,
+trait HealthTracker extends Logging {
+  def applyExcludeOnFailureTimeout(): Unit
+  def isNodeExcluded(node: String): Boolean
+  def isExecutorExcluded(executorId: String): Boolean
+  private[scheduler] def killExcludedIdleExecutor(executorId: String): Unit
+  def handleRemovedExecutor(executorId: String): Unit
+  def excludedNodeList(): Set[String]
+  def updateExcludedForSuccessfulTaskSet(
+    stageId: Int,
+    stageAttemptId: Int,
+    failuresByExec: HashMap[String, ExecutorFailuresInTaskSet]): Unit
+  def updateExcludedForFetchFailure(host: String, executorId: String): Unit
+}
+
+private class HealthTrackerImpl(
+    listenerBus: LiveListenerBus,
     conf: SparkConf,
     allocationClient: Option[ExecutorAllocationClient],
-    clock: Clock = new SystemClock()) extends Logging {
+    clock: Clock = new SystemClock()) extends HealthTracker {
 
   def this(sc: SparkContext, allocationClient: Option[ExecutorAllocationClient]) = {
     this(sc.listenerBus, sc.conf, allocationClient)
@@ -398,6 +412,18 @@ private[scheduler] class HealthTracker (
 private[spark] object HealthTracker extends Logging {
 
   private val DEFAULT_TIMEOUT = "1h"
+
+    def apply(
+      listenerBus: LiveListenerBus,
+      conf: SparkConf,
+      allocationClient: Option[ExecutorAllocationClient],
+      clock: Clock = new SystemClock()): HealthTracker = {
+    new HealthTrackerImpl(listenerBus, conf, allocationClient, clock)
+  }
+
+  def apply(sc: SparkContext, allocationClient: Option[ExecutorAllocationClient]): HealthTracker = {
+    apply(sc.listenerBus, sc.conf, allocationClient)
+  }
 
   /**
    * Returns true if the excludeOnFailure is enabled, based on checking the configuration

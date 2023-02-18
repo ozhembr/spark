@@ -19,6 +19,7 @@ package org.apache.spark.scheduler
 import org.apache.spark._
 import org.apache.spark.internal.config
 import org.apache.spark.internal.config.Tests._
+import org.apache.spark.rpc.RpcEndpointRef
 
 class HealthTrackerIntegrationSuite extends SchedulerIntegrationSuite[MultiExecutorMockBackend]{
 
@@ -125,8 +126,8 @@ class HealthTrackerIntegrationSuite extends SchedulerIntegrationSuite[MultiExecu
 }
 
 class MultiExecutorMockBackend(
-    conf: SparkConf,
-    taskScheduler: TaskSchedulerImpl) extends MockBackend(conf, taskScheduler) {
+    override val sc: SparkContext,
+    taskScheduler: TaskSchedulerImpl) extends MockBackend(sc, taskScheduler) {
 
   val nHosts = conf.get(TEST_N_HOSTS)
   val nExecutorsPerHost = conf.get(TEST_N_EXECUTORS_HOST)
@@ -144,6 +145,8 @@ class MultiExecutorMockBackend(
   }
 
   override def defaultParallelism(): Int = nHosts * nExecutorsPerHost * nCoresPerExecutor
+
+  override val driverEndpoint: RpcEndpointRef = null
 }
 
 class MockRDDWithLocalityPrefs(

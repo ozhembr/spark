@@ -21,4 +21,23 @@ package org.apache.spark
  * Spark's scheduling components. This includes the `org.apache.spark.scheduler.DAGScheduler` and
  * lower level `org.apache.spark.scheduler.TaskScheduler`.
  */
-package object scheduler
+package object scheduler {
+  case class StageToCreate[S <: Stage](
+  	stage: S, missingStages: List[Stage], missingShuffleIdStagePairs: Seq[(Int, ShuffleMapStage)]) {
+    def apply(): S = stage
+
+    def addMissingStages(
+    	stages: List[Stage], shuffleIdStagePairs: Seq[(Int, ShuffleMapStage)]): StageToCreate[S] = {
+      copy(
+        missingStages = stages ::: missingStages,
+        missingShuffleIdStagePairs = missingShuffleIdStagePairs ++ shuffleIdStagePairs)
+    }
+  }
+
+  case class ParentStages(
+  	stages: List[Stage],
+  	missingStages: List[Stage],
+  	missingShuffleIdStagePairs: Seq[(Int, ShuffleMapStage)]) {
+    def apply(): List[Stage] = stages
+  }
+}

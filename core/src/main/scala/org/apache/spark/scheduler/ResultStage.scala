@@ -17,6 +17,8 @@
 
 package org.apache.spark.scheduler
 
+import java.util.concurrent.atomic.AtomicReference
+
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.CallSite
@@ -42,16 +44,17 @@ private[spark] class ResultStage(
    * The active job for this result stage. Will be empty if the job has already finished
    * (e.g., because the job was cancelled).
    */
-  private[this] var _activeJob: Option[ActiveJob] = None
+  private[this] val _activeJob: AtomicReference[Option[ActiveJob]] =
+    new AtomicReference[Option[ActiveJob]](None)
 
-  def activeJob: Option[ActiveJob] = _activeJob
+  def activeJob: Option[ActiveJob] = _activeJob.get()
 
-  def setActiveJob(job: ActiveJob): Unit = {
-    _activeJob = Option(job)
+  def addActiveJob(job: ActiveJob): Unit = {
+    _activeJob.set(Option(job))
   }
 
   def removeActiveJob(): Unit = {
-    _activeJob = None
+    _activeJob.set(None)
   }
 
   /**

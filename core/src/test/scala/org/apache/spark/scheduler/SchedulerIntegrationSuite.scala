@@ -37,6 +37,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.SCHEDULER_REVIVE_INTERVAL
 import org.apache.spark.rdd.RDD
 import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.util.{CallSite, ThreadUtils, Utils}
 
 /**
@@ -292,7 +293,7 @@ abstract class SchedulerIntegrationSuite[T <: MockBackend: ClassTag] extends Spa
  * [[beginTask]], [[taskSuccess]], and [[taskFailed]].
  */
 private[spark] abstract class MockBackend(
-    conf: SparkConf,
+    sc: SparkContext,
     val taskScheduler: TaskSchedulerImpl) extends SchedulerBackend with Logging {
 
   // Periodically revive offers to allow delay scheduling to work
@@ -408,7 +409,7 @@ private[spark] abstract class MockBackend(
       // tests from introducing a race if they need it.
       val newTasks = newTaskDescriptions.map { taskDescription =>
         val taskSet =
-          Option(taskScheduler.taskIdToTaskSetManager.get(taskDescription.taskId).taskSet).get
+          taskScheduler.taskIdToTaskSetManager(taskDescription.taskId).taskSet
         val task = taskSet.tasks(taskDescription.index)
         (taskDescription, task)
       }
@@ -434,8 +435,8 @@ private[spark] abstract class MockBackend(
  * A very simple mock backend that can just run one task at a time.
  */
 private[spark] class SingleCoreMockBackend(
-  conf: SparkConf,
-  taskScheduler: TaskSchedulerImpl) extends MockBackend(conf, taskScheduler) {
+  val sc: SparkContext,
+  taskScheduler: TaskSchedulerImpl) extends MockBackend(sc, taskScheduler) {
 
   val cores = 1
 
@@ -448,6 +449,8 @@ private[spark] class SingleCoreMockBackend(
   override val executorIdToExecutor: Map[String, ExecutorTaskStatus] = Map(
     localExecutorId -> new ExecutorTaskStatus(localExecutorHostname, localExecutorId, freeCores)
   )
+
+  override val driverEndpoint: RpcEndpointRef = null
 }
 
 case class ExecutorTaskStatus(host: String, executorId: String, var freeCores: Int)

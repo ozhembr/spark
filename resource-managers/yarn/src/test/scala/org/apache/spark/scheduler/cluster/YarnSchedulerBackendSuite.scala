@@ -25,7 +25,7 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark._
 import org.apache.spark.resource.ResourceProfile
-import org.apache.spark.scheduler.TaskSchedulerImpl
+import org.apache.spark.scheduler.{TaskScheduler, TaskSchedulerImpl}
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.ui.TestFilter
 
@@ -50,8 +50,11 @@ class YarnSchedulerBackendSuite extends SparkFunSuite with MockitoSugar with Loc
     override def excludedNodes(): Set[String] = excludedNodesList.get()
   }
 
-  private class TestYarnSchedulerBackend(scheduler: TaskSchedulerImpl, sc: SparkContext)
-      extends YarnSchedulerBackend(scheduler, sc) {
+  private class TestYarnSchedulerBackend(scheduler: TaskSchedulerImpl, sparkContext: SparkContext)
+      extends CoarseGrainedSchedulerBackend with YarnSchedulerBackend {
+    override val sc: SparkContext = sparkContext
+    override def taskScheduler: TaskScheduler = scheduler
+    override def id: Option[Int] = None
     def setHostToLocalTaskCount(hostToLocalTaskCount: Map[Int, Map[String, Int]]): Unit = {
       this.rpHostToLocalTaskCount = hostToLocalTaskCount
     }
@@ -76,7 +79,8 @@ class YarnSchedulerBackendSuite extends SparkFunSuite with MockitoSugar with Loc
       yarnSchedulerBackendExtended.setHostToLocalTaskCount(hostToLocalCount)
       sched.setNodeExcludeList(excludelist)
       val request = Map(defaultResourceProf -> numRequested)
-      val req = yarnSchedulerBackendExtended.prepareRequestExecutors(request)
+      val req = yarnSchedulerBackendExtended
+        .prepareRequestExecutors(request, Map.empty, Map.empty)
       assert(req.resourceProfileToTotalExecs(defaultResourceProf) === numRequested)
       assert(req.excludedNodes === excludelist)
       val hosts =
@@ -101,7 +105,12 @@ class YarnSchedulerBackendSuite extends SparkFunSuite with MockitoSugar with Loc
     // Before adding the "YARN" filter, should get the code from the filter in SparkConf.
     assert(TestUtils.httpResponseCode(url) === HttpServletResponse.SC_BAD_GATEWAY)
 
-    yarnSchedulerBackend = new YarnSchedulerBackend(sched, sc) { }
+    val sparkContext = sc
+    yarnSchedulerBackend = new CoarseGrainedSchedulerBackend with YarnSchedulerBackend {
+      override val sc: SparkContext = sparkContext
+      override def taskScheduler: TaskScheduler = sched
+      override def id: Option[Int] = None
+    }
 
     yarnSchedulerBackend.addWebUIFilter(classOf[TestFilter2].getName(),
       Map("responseCode" -> HttpServletResponse.SC_NOT_ACCEPTABLE.toString), "")

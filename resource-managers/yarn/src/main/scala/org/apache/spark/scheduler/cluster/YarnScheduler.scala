@@ -21,10 +21,23 @@ import org.apache.hadoop.net.NetworkTopology
 
 import org.apache.spark._
 import org.apache.spark.deploy.yarn.SparkRackResolver
-import org.apache.spark.scheduler.TaskSchedulerImpl
-import org.apache.spark.util.Utils
+import org.apache.spark.internal.config
+import org.apache.spark.scheduler.{HealthTracker, TaskSchedulerImpl}
+import org.apache.spark.util.{Clock, SystemClock, Utils}
 
-private[spark] class YarnScheduler(sc: SparkContext) extends TaskSchedulerImpl(sc) {
+private[spark] class YarnScheduler(
+   override val sc: SparkContext,
+   override val maxTaskFailures: Int,
+   isLocal: Boolean = false,
+   clock: Clock = new SystemClock,
+   id: Option[Int] = None,
+   healthTrackerFactory: (SparkContext, Option[ExecutorAllocationClient]) =>
+     HealthTracker = HealthTracker(_, _))
+  extends TaskSchedulerImpl(sc, maxTaskFailures, isLocal, clock, id, healthTrackerFactory) {
+
+  def this(sc: SparkContext) = {
+    this(sc, sc.conf.get(config.TASK_MAX_FAILURES))
+  }
 
   override val defaultRackValue: Option[String] = Some(NetworkTopology.DEFAULT_RACK)
 

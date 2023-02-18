@@ -322,8 +322,13 @@ private class CSMockExternalClusterManager extends ExternalClusterManager {
 }
 
 private[spark]
-class TestCoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, override val rpcEnv: RpcEnv)
-  extends CoarseGrainedSchedulerBackend(scheduler, rpcEnv) {
+class TestCoarseGrainedSchedulerBackend(
+  override val sc: SparkContext, scheduler: TaskSchedulerImpl, env: RpcEnv)
+  extends CoarseGrainedSchedulerBackend {
+  def taskScheduler: TaskScheduler = scheduler
+  override lazy val rpcEnv: RpcEnv = env
+
+  def id: Option[Int] = None
 
   def getTaskSchedulerImpl(): TaskSchedulerImpl = scheduler
 }

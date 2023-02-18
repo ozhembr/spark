@@ -21,6 +21,7 @@ import java.nio.ByteBuffer
 
 import org.apache.spark.TaskState.TaskState
 import org.apache.spark.resource.{ResourceInformation, ResourceProfile}
+import org.apache.spark.rpc.RpcAddress
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.scheduler.ExecutorLossReason
 import org.apache.spark.util.SerializableBuffer
@@ -63,6 +64,13 @@ private[spark] object CoarseGrainedClusterMessages {
       resources: Map[String, ResourceInformation],
       resourceProfileId: Int)
     extends CoarseGrainedClusterMessage
+
+  case class RegisteredExecutor(
+      registerExecutor: RegisterExecutor, address: RpcAddress) extends CoarseGrainedClusterMessage {
+    def executorId: String = registerExecutor.executorId
+  }
+
+  case class RegisteredExecutors(seq: Seq[RegisteredExecutor]) extends CoarseGrainedClusterMessage
 
   case class LaunchedExecutor(executorId: String) extends CoarseGrainedClusterMessage
 

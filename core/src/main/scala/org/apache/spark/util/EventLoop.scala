@@ -17,7 +17,7 @@
 
 package org.apache.spark.util
 
-import java.util.concurrent.{BlockingQueue, LinkedBlockingDeque}
+import java.util.concurrent.{BlockingDeque, LinkedBlockingDeque}
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.util.control.NonFatal
@@ -33,7 +33,7 @@ import org.apache.spark.internal.Logging
  */
 private[spark] abstract class EventLoop[E](name: String) extends Logging {
 
-  private val eventQueue: BlockingQueue[E] = new LinkedBlockingDeque[E]()
+  private val eventDeque: BlockingDeque[E] = new LinkedBlockingDeque[E]()
 
   private val stopped = new AtomicBoolean(false)
 
@@ -44,7 +44,7 @@ private[spark] abstract class EventLoop[E](name: String) extends Logging {
     override def run(): Unit = {
       try {
         while (!stopped.get) {
-          val event = eventQueue.take()
+          val event = eventDeque.take()
           try {
             onReceive(event)
           } catch {
@@ -57,7 +57,7 @@ private[spark] abstract class EventLoop[E](name: String) extends Logging {
           }
         }
       } catch {
-        case ie: InterruptedException => // exit even if eventQueue is not empty
+        case ie: InterruptedException => // exit even if eventDeque is not empty
         case NonFatal(e) => logError("Unexpected error in " + name, e)
       }
     }
@@ -96,13 +96,10 @@ private[spark] abstract class EventLoop[E](name: String) extends Logging {
     }
   }
 
-  /**
-   * Put the event into the event queue. The event thread will process it later.
-   */
-  def post(event: E): Unit = {
+  private def postEvent(event: E, call: (BlockingDeque[E], E) => Unit): Unit = {
     if (!stopped.get) {
       if (eventThread.isAlive) {
-        eventQueue.put(event)
+        call(eventDeque, event)
       } else {
         onError(new IllegalStateException(s"$name has already been stopped accidentally."))
       }
@@ -110,8 +107,12 @@ private[spark] abstract class EventLoop[E](name: String) extends Logging {
   }
 
   /**
-   * Return if the event thread has already been started but not yet stopped.
+   * Put the event into the event queue. The event thread will process it later.
    */
+  def post(event: E): Unit = postEvent(event, _.put(_))
+
+  def postFirst(event: E): Unit = postEvent(event, _.putFirst(_))
+
   def isActive: Boolean = eventThread.isAlive
 
   /**

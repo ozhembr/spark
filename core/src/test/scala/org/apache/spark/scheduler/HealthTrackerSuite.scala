@@ -32,7 +32,7 @@ class HealthTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with Mock
 
   private val clock = new ManualClock(0)
 
-  private var healthTracker: HealthTracker = _
+  private var healthTracker: HealthTrackerImpl = _
   private var listenerBusMock: LiveListenerBus = _
   private var scheduler: TaskSchedulerImpl = _
   private var conf: SparkConf = _
@@ -45,7 +45,7 @@ class HealthTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with Mock
     clock.setTime(0)
 
     listenerBusMock = mock[LiveListenerBus]
-    healthTracker = new HealthTracker(listenerBusMock, conf, None, clock)
+    healthTracker = new HealthTrackerImpl(listenerBusMock, conf, None, clock)
   }
 
   override def afterEach(): Unit = {
@@ -496,7 +496,7 @@ class HealthTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with Mock
         throw new IllegalStateException("hostA should be on the exclude")
       }
     }
-    healthTracker = new HealthTracker(listenerBusMock, conf, Some(allocationClientMock), clock)
+    healthTracker = new HealthTrackerImpl(listenerBusMock, conf, Some(allocationClientMock), clock)
 
     // Disable auto-kill. Exclude an executor and make sure killExecutors is not called.
     conf.set(config.EXCLUDE_ON_FAILURE_KILL_ENABLED, false)
@@ -527,7 +527,7 @@ class HealthTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with Mock
 
     // Enable auto-kill. Exclude an executor and make sure killExecutors is called.
     conf.set(config.EXCLUDE_ON_FAILURE_KILL_ENABLED, true)
-    healthTracker = new HealthTracker(listenerBusMock, conf, Some(allocationClientMock), clock)
+    healthTracker = new HealthTrackerImpl(listenerBusMock, conf, Some(allocationClientMock), clock)
 
     val taskSetExclude2 = createTaskSetExcludelist(stageId = 0)
     // Fail 4 tasks in one task set on executor 1, so that executor gets excluded for the whole
@@ -569,7 +569,7 @@ class HealthTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with Mock
     }
 
     conf.set(config.EXCLUDE_ON_FAILURE_FETCH_FAILURE_ENABLED, true)
-    healthTracker = new HealthTracker(listenerBusMock, conf, Some(allocationClientMock), clock)
+    healthTracker = new HealthTrackerImpl(listenerBusMock, conf, Some(allocationClientMock), clock)
 
     // Disable auto-kill. Exclude an executor and make sure killExecutors is not called.
     conf.set(config.EXCLUDE_ON_FAILURE_KILL_ENABLED, false)
@@ -583,7 +583,7 @@ class HealthTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with Mock
 
     // Enable auto-kill. Exclude an executor and make sure killExecutors is called.
     conf.set(config.EXCLUDE_ON_FAILURE_KILL_ENABLED, true)
-    healthTracker = new HealthTracker(listenerBusMock, conf, Some(allocationClientMock), clock)
+    healthTracker = new HealthTrackerImpl(listenerBusMock, conf, Some(allocationClientMock), clock)
     clock.advance(1000)
     healthTracker.updateExcludedForFetchFailure("hostA", exec = "1")
 

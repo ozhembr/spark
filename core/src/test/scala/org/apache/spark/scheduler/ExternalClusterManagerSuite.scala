@@ -17,11 +17,14 @@
 
 package org.apache.spark.scheduler
 
+import java.nio.ByteBuffer
 import scala.collection.mutable.Map
 
 import org.apache.spark.{LocalSparkContext, SparkConf, SparkContext, SparkFunSuite}
+import org.apache.spark.TaskState.TaskState
 import org.apache.spark.executor.ExecutorMetrics
 import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.AccumulatorV2
@@ -72,7 +75,13 @@ private class DummySchedulerBackend extends SchedulerBackend {
   def stop(): Unit = {}
   def reviveOffers(): Unit = {}
   def defaultParallelism(): Int = 1
-  def maxNumConcurrentTasks(rp: ResourceProfile): Int = 0
+  override def maxNumConcurrentTasks(rp: ResourceProfile): Int = 0
+
+  override def sc: SparkContext = SparkContext.getOrCreate()
+
+  override def taskScheduler: TaskScheduler = new DummyTaskScheduler
+
+  override val driverEndpoint: RpcEndpointRef = null
 }
 
 private class DummyTaskScheduler extends TaskScheduler {
@@ -103,4 +112,19 @@ private class DummyTaskScheduler extends TaskScheduler {
     decommissionInfo: ExecutorDecommissionInfo): Unit = {}
   override def getExecutorDecommissionState(
     executorId: String): Option[ExecutorDecommissionState] = None
+  override def initialize(backend: SchedulerBackend): Unit = {}
+
+  override def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer): Unit = {}
+
+  override def getExecutorsAliveOnHost(host: String): Option[Set[String]] = None
+
+  override def excludedNodes(): Set[String] = Set.empty
+
+  override def resourceOffers(
+      offers: IndexedSeq[WorkerOffer],
+      isAllFreeResources: Boolean): Seq[Seq[TaskDescription]] = Seq.empty
+
+  override def taskSetManagerByTaskId(taskId: Long): Option[TaskSetManager] = None
+
+  override def isExecutorBusy(execId: String): Boolean = true
 }

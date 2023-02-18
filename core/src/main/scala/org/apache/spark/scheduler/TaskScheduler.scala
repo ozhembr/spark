@@ -17,9 +17,15 @@
 
 package org.apache.spark.scheduler
 
-import scala.collection.mutable.Map
+import java.nio.ByteBuffer
 
+import scala.collection.mutable
+
+import org.apache.spark.SparkContext
+import org.apache.spark.TaskState.TaskState
 import org.apache.spark.executor.ExecutorMetrics
+import org.apache.spark.internal.Logging
+import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.AccumulatorV2
@@ -40,6 +46,8 @@ private[spark] trait TaskScheduler {
   def rootPool: Pool
 
   def schedulingMode: SchedulingMode
+
+  def initialize(backend: SchedulerBackend): Unit
 
   def start(): Unit
 
@@ -89,7 +97,7 @@ private[spark] trait TaskScheduler {
       execId: String,
       accumUpdates: Array[(Long, Seq[AccumulatorV2[_, _]])],
       blockManagerId: BlockManagerId,
-      executorUpdates: Map[(Int, Int), ExecutorMetrics]): Boolean
+      executorUpdates: mutable.Map[(Int, Int), ExecutorMetrics]): Boolean
 
   /**
    * Get an application ID associated with the job.
@@ -125,4 +133,84 @@ private[spark] trait TaskScheduler {
    */
   def applicationAttemptId(): Option[String]
 
+  def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer): Unit
+
+  def getExecutorsAliveOnHost(host: String): Option[Set[String]]
+
+  def excludedNodes(): Set[String]
+
+  def resourceOffers(
+                      offers: IndexedSeq[WorkerOffer],
+                      isAllFreeResources: Boolean = true): Seq[Seq[TaskDescription]]
+
+  def taskSetManagerByTaskId(taskId: Long): Option[TaskSetManager]
+
+  def isExecutorBusy(execId: String): Boolean
+
+  def onCompletionEvent(event: CompletionEvent): Unit = {}
+
+  def onJobSuccess(jobId: Int): Unit = {}
+
+  def onJobFailure(jobId: Int): Unit = {}
+
+  def writeLock[T](fn: => T): T = this.synchronized(fn)
+
+  private[scheduler] def clearExecutors(executorIds: Seq[String]): Seq[String] = Seq()
+}
+
+private [spark] object TaskScheduler extends Logging {
+  /**
+   * Calculate the max available task slots given the `availableCpus` and `availableResources`
+   * from a collection of ResourceProfiles. And only those ResourceProfiles who has the
+   * same id with the `rpId` can be used to calculate the task slots.
+   *
+   * @param rpId the target ResourceProfile id. Only those ResourceProfiles who has the same id
+   *             with it can be used to calculate the task slots.
+   * @param availableRPIds an Array of ids of the available ResourceProfiles from the executors.
+   * @param availableCpus an Array of the amount of available cpus from the executors.
+   * @param availableResources an Array of the resources map from the executors. In the resource
+   *                           map, it maps from the resource name to its amount.
+   * @return the number of max task slots
+   */
+  def calculateAvailableSlots(
+                               sc: SparkContext,
+                               rpId: Int,
+                               availableRPIds: Array[Int],
+                               availableCpus: Array[Int],
+                               availableResources: Array[Map[String, Int]]): Int = {
+    val conf = sc.conf
+    val resourceProfile = sc.resourceProfileManager.resourceProfileFromId(rpId)
+    val coresKnown = resourceProfile.isCoresLimitKnown
+    val (limitingResource, limitedByCpu) = {
+      val limiting = resourceProfile.limitingResource(conf)
+      // if limiting resource is empty then we have no other resources, so it has to be CPU
+      if (limiting == ResourceProfile.CPUS || limiting.isEmpty) {
+        (ResourceProfile.CPUS, true)
+      } else {
+        (limiting, false)
+      }
+    }
+    val cpusPerTask = ResourceProfile.getTaskCpusOrDefaultForProfile(resourceProfile, conf)
+    val taskLimit = resourceProfile.taskResources.get(limitingResource).map(_.amount).get
+
+    availableCpus.zip(availableResources).zip(availableRPIds)
+      .filter { case (_, id) => id == rpId }
+      .map { case ((cpu, resources), _) =>
+        val numTasksPerExecCores = cpu / cpusPerTask
+        if (limitedByCpu) {
+          numTasksPerExecCores
+        } else {
+          val availAddrs = resources.getOrElse(limitingResource, 0)
+          val resourceLimit = (availAddrs / taskLimit).toInt
+          // when executor cores config isn't set, we can't calculate the real limiting resource
+          // and number of tasks per executor ahead of time, so calculate it now based on what
+          // is available.
+          if (!coresKnown && numTasksPerExecCores <= resourceLimit) {
+            numTasksPerExecCores
+          } else {
+            resourceLimit
+          }
+        }
+      }.sum
+  }
 }

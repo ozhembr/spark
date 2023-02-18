@@ -33,7 +33,7 @@ import org.apache.spark.deploy.worker.Worker
 import org.apache.spark.internal.config
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef, RpcEnv}
-import org.apache.spark.scheduler.TaskSchedulerImpl
+import org.apache.spark.scheduler.{TaskScheduler, TaskSchedulerImpl}
 import org.apache.spark.scheduler.cluster._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{LaunchedExecutor, RegisterExecutor}
 
@@ -515,7 +515,13 @@ class StandaloneDynamicAllocationSuite
 
     val rpcEnv = RpcEnv.create("test-rpcenv", "localhost", 0, conf, securityManager)
     try {
-      val scheduler = new CoarseGrainedSchedulerBackend(taskScheduler, rpcEnv)
+      val sparkContext = sc
+      val ts = taskScheduler
+      val scheduler = new CoarseGrainedSchedulerBackend {
+        def sc: SparkContext = sparkContext
+        def taskScheduler: TaskScheduler = ts
+        def id: Option[Int] = None
+      }
       try {
         scheduler.start()
         val e = intercept[SparkException] {

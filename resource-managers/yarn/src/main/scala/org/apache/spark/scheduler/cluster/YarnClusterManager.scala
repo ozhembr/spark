@@ -19,11 +19,18 @@ package org.apache.spark.scheduler.cluster
 
 import org.apache.spark.{SparkContext, SparkException}
 import org.apache.spark.scheduler.{ExternalClusterManager, SchedulerBackend, TaskScheduler, TaskSchedulerImpl}
+import org.apache.spark.scheduler.parallel.{ParallelSchedulerBackend, ParallelTaskScheduler}
 
 /**
  * Cluster Manager for creation of Yarn scheduler and backend
  */
 private[spark] class YarnClusterManager extends ExternalClusterManager {
+
+  private def isParallelSchedulers(sc: SparkContext): Boolean = {
+    sc.conf
+      .getOption("spark.driver.schedulers.parallelism")
+      .exists(_.toInt > 1)
+  }
 
   override def canCreate(masterURL: String): Boolean = {
     masterURL == "yarn"
@@ -32,25 +39,43 @@ private[spark] class YarnClusterManager extends ExternalClusterManager {
   override def createTaskScheduler(sc: SparkContext, masterURL: String): TaskScheduler = {
     sc.deployMode match {
       case "cluster" => new YarnClusterScheduler(sc)
-      case "client" => new YarnScheduler(sc)
+      case "client" =>
+        if (isParallelSchedulers(sc)) {
+          new YarnSchedulerPar(sc)
+        } else {
+          new YarnScheduler(sc)
+        }
       case _ => throw new SparkException(s"Unknown deploy mode '${sc.deployMode}' for Yarn")
     }
   }
 
-  override def createSchedulerBackend(sc: SparkContext,
+  override def createSchedulerBackend(sparkContext: SparkContext,
       masterURL: String,
       scheduler: TaskScheduler): SchedulerBackend = {
-    sc.deployMode match {
+    sparkContext.deployMode match {
       case "cluster" =>
-        new YarnClusterSchedulerBackend(scheduler.asInstanceOf[TaskSchedulerImpl], sc)
+        new YarnClusterSchedulerBackend(scheduler.asInstanceOf[TaskSchedulerImpl], sparkContext)
       case "client" =>
-        new YarnClientSchedulerBackend(scheduler.asInstanceOf[TaskSchedulerImpl], sc)
+        if (isParallelSchedulers(sparkContext)) {
+          new ParallelSchedulerBackend with YarnClientSchedulerBackend {
+            override def sc: SparkContext = sparkContext
+
+            override val parallelTaskScheduler: ParallelTaskScheduler =
+              scheduler.asInstanceOf[ParallelTaskScheduler]
+          }
+        } else {
+          new CoarseGrainedSchedulerBackend with YarnClientSchedulerBackend {
+            override def sc: SparkContext = sparkContext
+            override def taskScheduler: TaskScheduler = scheduler
+            override def id: Option[Int] = None
+          }
+        }
       case  _ =>
-        throw new SparkException(s"Unknown deploy mode '${sc.deployMode}' for Yarn")
+        throw new SparkException(s"Unknown deploy mode '${sparkContext.deployMode}' for Yarn")
     }
   }
 
   override def initialize(scheduler: TaskScheduler, backend: SchedulerBackend): Unit = {
-    scheduler.asInstanceOf[TaskSchedulerImpl].initialize(backend)
+    scheduler.initialize(backend)
   }
 }

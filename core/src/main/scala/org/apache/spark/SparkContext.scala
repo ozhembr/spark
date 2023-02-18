@@ -1885,11 +1885,12 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Gets the locality information associated with the partition in a particular rdd
    * @param rdd of interest
-   * @param partition to be looked up for locality
+   * @param partitions to be looked up for locality
    * @return list of preferred locations for the partition
    */
-  private [spark] def getPreferredLocs(rdd: RDD[_], partition: Int): Seq[TaskLocation] = {
-    dagScheduler.getPreferredLocs(rdd, partition)
+  private [spark] def getPreferredLocs(
+      rdd: RDD[_], partitions: Seq[Int]): Map[Int, Seq[TaskLocation]] = {
+    dagScheduler.getPreferredLocs(rdd, partitions)
   }
 
   /**
@@ -1971,7 +1972,7 @@ class SparkContext(config: SparkConf) extends Logging {
         // For local paths with backslashes on Windows, URI throws an exception
         addLocalJarFile(new File(path))
       } else {
-        val uri = Utils.resolveURI(path)
+        val uri = new Path(path).toUri
         // SPARK-17650: Make sure this is a valid URL before adding it to the list of dependencies
         Utils.validateURL(uri)
         uri.getScheme match {
@@ -2881,7 +2882,7 @@ object SparkContext extends Logging {
       case "local" =>
         checkResourcesPerTask(1)
         val scheduler = new TaskSchedulerImpl(sc, MAX_LOCAL_TASK_FAILURES, isLocal = true)
-        val backend = new LocalSchedulerBackend(sc.getConf, scheduler, 1)
+        val backend = new LocalSchedulerBackend(scheduler, 1)
         scheduler.initialize(backend)
         (backend, scheduler)
 
@@ -2894,7 +2895,7 @@ object SparkContext extends Logging {
         }
         checkResourcesPerTask(threadCount)
         val scheduler = new TaskSchedulerImpl(sc, MAX_LOCAL_TASK_FAILURES, isLocal = true)
-        val backend = new LocalSchedulerBackend(sc.getConf, scheduler, threadCount)
+        val backend = new LocalSchedulerBackend(scheduler, threadCount)
         scheduler.initialize(backend)
         (backend, scheduler)
 
@@ -2905,7 +2906,7 @@ object SparkContext extends Logging {
         val threadCount = if (threads == "*") localCpuCount else threads.toInt
         checkResourcesPerTask(threadCount)
         val scheduler = new TaskSchedulerImpl(sc, maxFailures.toInt, isLocal = true)
-        val backend = new LocalSchedulerBackend(sc.getConf, scheduler, threadCount)
+        val backend = new LocalSchedulerBackend(scheduler, threadCount)
         scheduler.initialize(backend)
         (backend, scheduler)
 

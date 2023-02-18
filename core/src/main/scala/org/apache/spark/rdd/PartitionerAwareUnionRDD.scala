@@ -108,6 +108,10 @@ class PartitionerAwareUnionRDD[T: ClassTag](
 
   // Get the *current* preferred locations from the DAGScheduler (as opposed to the static ones)
   private def currPrefLocs(rdd: RDD[_], part: Partition): Seq[String] = {
-    rdd.context.getPreferredLocs(rdd, part.index).map(tl => tl.host)
+    rdd.context
+      .getPreferredLocs(rdd, Seq(part.index))
+      .map(_._2.map(_.host))
+      .headOption
+      .getOrElse(Seq())
   }
 }

@@ -17,7 +17,10 @@
 
 package org.apache.spark.scheduler
 
-import scala.collection.mutable.HashSet
+import java.util.concurrent.ConcurrentHashMap
+
+import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.Logging
@@ -66,7 +69,7 @@ private[scheduler] abstract class Stage(
   val numPartitions = rdd.partitions.length
 
   /** Set of jobs that this stage belongs to. */
-  val jobIds = new HashSet[Int]
+  val jobIds: mutable.Set[Int] = ConcurrentHashMap.newKeySet[Int]().asScala
 
   /** The ID to use for the next new attempt for this stage. */
   private var nextAttemptId: Int = 0
@@ -89,7 +92,7 @@ private[scheduler] abstract class Stage(
    * We keep track of each attempt ID that has failed to avoid recording duplicate failures if
    * multiple tasks from the same stage attempt fail (SPARK-5945).
    */
-  val failedAttemptIds = new HashSet[Int]
+  val failedAttemptIds: mutable.Set[Int] = ConcurrentHashMap.newKeySet[Int]().asScala
 
   private[scheduler] def clearFailures() : Unit = {
     failedAttemptIds.clear()
@@ -116,6 +119,8 @@ private[scheduler] abstract class Stage(
     case stage: Stage => stage != null && stage.id == id
     case _ => false
   }
+
+  def addActiveJob(job: ActiveJob): Unit
 
   /** Returns the sequence of partition ids that are missing (i.e. needs to be computed). */
   def findMissingPartitions(): Seq[Int]

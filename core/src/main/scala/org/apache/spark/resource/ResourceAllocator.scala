@@ -17,7 +17,9 @@
 
 package org.apache.spark.resource
 
-import scala.collection.mutable
+import java.util.concurrent.atomic.AtomicInteger
+
+import scala.collection.immutable.HashMap
 
 import org.apache.spark.SparkException
 
@@ -41,8 +43,8 @@ private[spark] trait ResourceAllocator {
    *
    * TODO Use [[org.apache.spark.util.collection.OpenHashMap]] instead to gain better performance.
    */
-  private lazy val addressAvailabilityMap = {
-    mutable.HashMap(resourceAddresses.map(_ -> slotsPerAddress): _*)
+  private lazy val addressAvailabilityMap: Map[String, AtomicInteger] = {
+    HashMap(resourceAddresses.map(_ -> new AtomicInteger(slotsPerAddress)): _*)
   }
 
   /**
@@ -54,7 +56,7 @@ private[spark] trait ResourceAllocator {
    */
   def availableAddrs: Seq[String] = addressAvailabilityMap
     .flatMap { case (addr, available) =>
-      (0 until available).map(_ => addr)
+      (0 until available.get()).map(_ => addr)
     }.toSeq.sorted
 
   /**
@@ -66,7 +68,7 @@ private[spark] trait ResourceAllocator {
    */
   private[spark] def assignedAddrs: Seq[String] = addressAvailabilityMap
     .flatMap { case (addr, available) =>
-      (0 until slotsPerAddress - available).map(_ => addr)
+      (0 until slotsPerAddress - available.get()).map(_ => addr)
     }.toSeq.sorted
 
   /**
@@ -76,16 +78,24 @@ private[spark] trait ResourceAllocator {
    */
   def acquire(addrs: Seq[String]): Unit = {
     addrs.foreach { address =>
-      if (!addressAvailabilityMap.contains(address)) {
-        throw new SparkException(s"Try to acquire an address that doesn't exist. $resourceName " +
-          s"address $address doesn't exist.")
-      }
-      val isAvailable = addressAvailabilityMap(address)
-      if (isAvailable > 0) {
-        addressAvailabilityMap(address) = addressAvailabilityMap(address) - 1
-      } else {
-        throw new SparkException("Try to acquire an address that is not available. " +
-          s"$resourceName address $address is not available.")
+      addressAvailabilityMap.get(address) match {
+        case Some(available) =>
+          val prev =
+            available.getAndUpdate { n =>
+              if (n > 0) {
+                n - 1
+              } else {
+                n
+              }
+            }
+
+          if (prev <= 0) {
+            throw new SparkException("Try to acquire an address that is not available. " +
+              s"$resourceName address $address is not available.")
+          }
+        case _ =>
+          throw new SparkException(s"Try to acquire an address that doesn't exist. $resourceName " +
+            s"address $address doesn't exist.")
       }
     }
   }
@@ -97,16 +107,26 @@ private[spark] trait ResourceAllocator {
    */
   def release(addrs: Seq[String]): Unit = {
     addrs.foreach { address =>
-      if (!addressAvailabilityMap.contains(address)) {
-        throw new SparkException(s"Try to release an address that doesn't exist. $resourceName " +
-          s"address $address doesn't exist.")
-      }
-      val isAvailable = addressAvailabilityMap(address)
-      if (isAvailable < slotsPerAddress) {
-        addressAvailabilityMap(address) = addressAvailabilityMap(address) + 1
-      } else {
-        throw new SparkException(s"Try to release an address that is not assigned. $resourceName " +
-          s"address $address is not assigned.")
+      addressAvailabilityMap.get(address) match {
+        case Some(available) =>
+          val slots = slotsPerAddress
+
+          val prev =
+            available.getAndUpdate { n =>
+              if (n < slots) {
+                n + 1
+              } else {
+                n
+              }
+            }
+
+          if (prev >= slots) {
+            throw new SparkException(s"Try to release an address that is not assigned." +
+              s" $resourceName address $address is not assigned.")
+          }
+        case _ =>
+          throw new SparkException(s"Try to release an address that doesn't exist. $resourceName " +
+            s"address $address doesn't exist.")
       }
     }
   }

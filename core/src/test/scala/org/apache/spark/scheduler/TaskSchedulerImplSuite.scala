@@ -34,14 +34,21 @@ import org.apache.spark.internal.config
 import org.apache.spark.resource.{ExecutorResourceRequests, ResourceProfile, TaskResourceRequests}
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.resource.TestResourceIDs._
+import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.util.{Clock, ManualClock}
 
-class FakeSchedulerBackend extends SchedulerBackend {
+class FakeSchedulerBackend(scheduler: TaskScheduler) extends SchedulerBackend {
   def start(): Unit = {}
   def stop(): Unit = {}
   def reviveOffers(): Unit = {}
   def defaultParallelism(): Int = 1
-  def maxNumConcurrentTasks(rp: ResourceProfile): Int = 0
+  override def maxNumConcurrentTasks(rp: ResourceProfile): Int = 0
+
+  override def sc: SparkContext = SparkContext.getOrCreate()
+
+  override def taskScheduler: TaskScheduler = scheduler
+
+  override val driverEndpoint: RpcEndpointRef = null
 }
 
 class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with BeforeAndAfterEach
@@ -121,7 +128,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
   }
 
   def setupHelper(): TaskSchedulerImpl = {
-    taskScheduler.initialize(new FakeSchedulerBackend)
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler))
     // Need to initialize a DAGScheduler for the taskScheduler to use for callbacks.
     dagScheduler = new DAGScheduler(sc, taskScheduler) {
       override def taskStarted(task: Task[_], taskInfo: TaskInfo): Unit = {}
@@ -244,7 +251,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
 
       override def executorAdded(execId: String, host: String): Unit = {}
     }
-    taskScheduler.initialize(new FakeSchedulerBackend)
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler))
     val taskSet = FakeTask.createTaskSet(8, 1, 1,
       Seq(TaskLocation("host1", "exec1")),
       Seq(TaskLocation("host1", "exec1")),
@@ -604,7 +611,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
     taskScheduler.submitTasks(attempt2)
     val taskDescriptions3 = taskScheduler.resourceOffers(workerOffers).flatten
     assert(1 === taskDescriptions3.length)
-    val mgr = Option(taskScheduler.taskIdToTaskSetManager.get(taskDescriptions3(0).taskId)).get
+    val mgr = taskScheduler.taskIdToTaskSetManager(taskDescriptions3(0).taskId)
     assert(mgr.taskSet.stageAttemptId === 1)
     assert(!failedTaskSet)
   }
@@ -642,7 +649,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
     assert(10 === taskDescriptions3.length)
 
     taskDescriptions3.foreach { task =>
-      val mgr = Option(taskScheduler.taskIdToTaskSetManager.get(task.taskId)).get
+      val mgr = taskScheduler.taskIdToTaskSetManager(task.taskId)
       assert(mgr.taskSet.stageAttemptId === 1)
     }
     assert(!failedTaskSet)
@@ -1283,7 +1290,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
     // only schedule one task because of locality
     assert(taskDescs.size === 1)
 
-    val mgr = Option(taskScheduler.taskIdToTaskSetManager.get(taskDescs(0).taskId)).get
+    val mgr = taskScheduler.taskIdToTaskSetManager(taskDescs(0).taskId)
     assert(mgr.myLocalityLevels.toSet === Set(TaskLocality.NODE_LOCAL, TaskLocality.ANY))
     // we should know about both executors, even though we only scheduled tasks on one of them
     assert(taskScheduler.getExecutorsAliveOnHost("host0") === Some(Set("executor0")))
@@ -1321,7 +1328,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
   test("if an executor is lost then the state for its running tasks is cleaned up (SPARK-18553)") {
     sc = new SparkContext("local", "TaskSchedulerImplSuite")
     val taskScheduler = new TaskSchedulerImpl(sc)
-    taskScheduler.initialize(new FakeSchedulerBackend)
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler))
     // Need to initialize a DAGScheduler for the taskScheduler to use for callbacks.
     new DAGScheduler(sc, taskScheduler) {
       override def taskStarted(task: Task[_], taskInfo: TaskInfo): Unit = {}
@@ -1352,7 +1359,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
   test("if a task finishes with TaskState.LOST its executor is marked as dead") {
     sc = new SparkContext("local", "TaskSchedulerImplSuite")
     val taskScheduler = new TaskSchedulerImpl(sc)
-    taskScheduler.initialize(new FakeSchedulerBackend)
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler))
     // Need to initialize a DAGScheduler for the taskScheduler to use for callbacks.
     new DAGScheduler(sc, taskScheduler) {
       override def taskStarted(task: Task[_], taskInfo: TaskInfo): Unit = {}
@@ -1409,7 +1416,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
       override def taskStarted(task: Task[_], taskInfo: TaskInfo): Unit = {}
       override def executorAdded(execId: String, host: String): Unit = {}
     }
-    taskScheduler.initialize(new FakeSchedulerBackend)
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler))
 
     // Make two different offers -- one in the preferred location, one that is not.
     val offers = IndexedSeq(
@@ -1449,7 +1456,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
       override def taskStarted(task: Task[_], taskInfo: TaskInfo): Unit = {}
       override def executorAdded(execId: String, host: String): Unit = {}
     }
-    taskScheduler.initialize(new FakeSchedulerBackend)
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler))
     // make an offer on the preferred host so the scheduler knows its alive.  This is necessary
     // so that the taskset knows that it *could* take advantage of locality.
     taskScheduler.resourceOffers(IndexedSeq(WorkerOffer("exec1", "host1", 1)))
@@ -1474,7 +1481,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
     intercept[IllegalArgumentException] {
       val taskScheduler = setupScheduler(
         TaskSchedulerImpl.SCHEDULER_MODE_PROPERTY -> SchedulingMode.NONE.toString)
-      taskScheduler.initialize(new FakeSchedulerBackend)
+      taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler))
     }
   }
 
@@ -1634,7 +1641,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
   test("cancelTasks shall kill all the running tasks and fail the stage") {
     val taskScheduler = setupScheduler()
 
-    taskScheduler.initialize(new FakeSchedulerBackend {
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler) {
       override def killTask(
           taskId: Long,
           executorId: String,
@@ -1642,7 +1649,9 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
           reason: String): Unit = {
         // Since we only submit one stage attempt, the following call is sufficient to mark the
         // task as killed.
-        taskScheduler.taskSetManagerForAttempt(0, 0).get.runningTasksSet.remove(taskId)
+        taskScheduler
+          .asInstanceOf[TaskSchedulerImpl]
+          .taskSetManagerForAttempt(0, 0).get.runningTasksSet.remove(taskId)
       }
     })
 
@@ -1665,7 +1674,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
   test("killAllTaskAttempts shall kill all the running tasks and not fail the stage") {
     val taskScheduler = setupScheduler()
 
-    taskScheduler.initialize(new FakeSchedulerBackend {
+    taskScheduler.initialize(new FakeSchedulerBackend(taskScheduler) {
       override def killTask(
           taskId: Long,
           executorId: String,
@@ -1673,7 +1682,9 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
           reason: String): Unit = {
         // Since we only submit one stage attempt, the following call is sufficient to mark the
         // task as killed.
-        taskScheduler.taskSetManagerForAttempt(0, 0).get.runningTasksSet.remove(taskId)
+        taskScheduler
+          .asInstanceOf[TaskSchedulerImpl]
+          .taskSetManagerForAttempt(0, 0).get.runningTasksSet.remove(taskId)
       }
     })
 

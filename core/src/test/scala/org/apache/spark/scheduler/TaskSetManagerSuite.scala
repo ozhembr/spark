@@ -498,7 +498,7 @@ class TaskSetManagerSuite
     // We don't directly use the application excludelist, but its presence triggers exclusion
     // within the taskset.
     val mockListenerBus = mock(classOf[LiveListenerBus])
-    val healthTrackerOpt = Some(new HealthTracker(mockListenerBus, conf, None, clock))
+    val healthTrackerOpt = Some(HealthTracker(mockListenerBus, conf, None, clock))
     val manager = new TaskSetManager(sched, taskSet, 4, healthTrackerOpt, clock)
 
     {
@@ -822,7 +822,7 @@ class TaskSetManagerSuite
     sc = new SparkContext("local", "test", conf)
 
     sched = new FakeTaskScheduler(sc, ("execA", "host1"), ("execB", "host2"))
-    sched.initialize(new FakeSchedulerBackend() {
+    sched.initialize(new FakeSchedulerBackend(sched) {
       override def killTask(
         taskId: Long,
         executorId: String,
@@ -898,7 +898,7 @@ class TaskSetManagerSuite
     var killTaskCalled = false
     sched = new FakeTaskScheduler(sc, ("exec1", "host1"),
       ("exec2", "host2"), ("exec3", "host3"))
-    sched.initialize(new FakeSchedulerBackend() {
+    sched.initialize(new FakeSchedulerBackend(sched) {
       override def killTask(
           taskId: Long,
           executorId: String,
@@ -1407,7 +1407,7 @@ class TaskSetManagerSuite
     sc = new SparkContext("local", "test", conf)
     sched = new FakeTaskScheduler(sc, ("exec1", "host1"), ("exec2", "host2"))
     val taskSet = FakeTask.createTaskSet(4)
-    val healthTracker = new HealthTracker(sc, None)
+    val healthTracker = HealthTracker(sc, None)
     val tsm = new TaskSetManager(sched, taskSet, 4, Some(healthTracker))
 
     // make some offers to our taskset, to get tasks we will fail
@@ -1448,7 +1448,7 @@ class TaskSetManagerSuite
 
     val clock = new ManualClock
     val mockListenerBus = mock(classOf[LiveListenerBus])
-    val healthTracker = new HealthTracker(mockListenerBus, conf, None, clock)
+    val healthTracker = HealthTracker(mockListenerBus, conf, None, clock)
     val taskSetManager = new TaskSetManager(sched, taskSet, 1, Some(healthTracker))
     val taskSetManagerSpy = spy(taskSetManager)
 
@@ -1511,7 +1511,7 @@ class TaskSetManagerSuite
     sc.conf.set(config.SPECULATION_ENABLED, true)
 
     sched = new FakeTaskScheduler(sc)
-    sched.initialize(new FakeSchedulerBackend())
+    sched.initialize(new FakeSchedulerBackend(sched))
 
     val dagScheduler = new FakeDAGScheduler(sc, sched)
     sched.setDAGScheduler(dagScheduler)
@@ -1542,7 +1542,7 @@ class TaskSetManagerSuite
     var killTaskCalled = false
     sched = new FakeTaskScheduler(sc, ("exec1", "host1"),
       ("exec2", "host2"), ("exec3", "host3"))
-    sched.initialize(new FakeSchedulerBackend() {
+    sched.initialize(new FakeSchedulerBackend(sched) {
       override def killTask(
           taskId: Long,
           executorId: String,

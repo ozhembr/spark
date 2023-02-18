@@ -39,11 +39,17 @@ import org.apache.spark.util.Utils
  */
 private[spark] class StandaloneSchedulerBackend(
     scheduler: TaskSchedulerImpl,
-    sc: SparkContext,
+    sparkContext: SparkContext,
     masters: Array[String])
-  extends CoarseGrainedSchedulerBackend(scheduler, sc.env.rpcEnv)
+  extends CoarseGrainedSchedulerBackend
   with StandaloneAppClientListener
   with Logging {
+
+  override def sc: SparkContext = sparkContext
+
+  override def taskScheduler: TaskScheduler = scheduler
+
+  override def id: Option[Int] = None
 
   private[spark] var client: StandaloneAppClient = null
   private val stopping = new AtomicBoolean(false)
@@ -211,7 +217,9 @@ private[spark] class StandaloneSchedulerBackend(
    * @return whether the request is acknowledged.
    */
   protected override def doRequestTotalExecutors(
-      resourceProfileToTotalExecs: Map[ResourceProfile, Int]): Future[Boolean] = {
+      resourceProfileToTotalExecs: Map[ResourceProfile, Int],
+      numLocalityAwareTasksPerResourceProfileId: Map[Int, Int],
+      hostToLocalTaskCount: Map[Int, Map[String, Int]]): Future[Boolean] = {
     // resources profiles not supported
     Option(client) match {
       case Some(c) =>

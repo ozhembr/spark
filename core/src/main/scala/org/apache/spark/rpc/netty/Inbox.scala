@@ -17,6 +17,9 @@
 
 package org.apache.spark.rpc.netty
 
+import java.util.Collections
+import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.annotation.concurrent.GuardedBy
 
 import scala.util.control.NonFatal
@@ -59,12 +62,12 @@ private[netty] class Inbox(val endpointName: String, val endpoint: RpcEndpoint)
 
   inbox =>  // Give this an alias so we can use it more clearly in closures.
 
-  @GuardedBy("this")
-  protected val messages = new java.util.LinkedList[InboxMessage]()
+  // OnStart should be the first message to process
+  protected val messages =
+    new LinkedBlockingDeque[InboxMessage](Collections.singletonList(OnStart))
 
   /** True if the inbox (and its associated endpoint) is stopped. */
-  @GuardedBy("this")
-  private var stopped = false
+  private val stopped = new AtomicBoolean(false)
 
   /** Allow multiple threads to process messages at the same time. */
   @GuardedBy("this")
@@ -74,15 +77,20 @@ private[netty] class Inbox(val endpointName: String, val endpoint: RpcEndpoint)
   @GuardedBy("this")
   private var numActiveThreads = 0
 
-  // OnStart should be the first message to process
-  inbox.synchronized {
-    messages.add(OnStart)
+  private lazy val delayStart: Unit = {
+    if (endpoint.rpcEnv.getConf
+      .getOption("spark.driver.schedulers.parallelism")
+      .exists(_.toInt > 1)) {
+      Thread.sleep(10000)
+    }
   }
 
   /**
    * Process stored messages.
    */
   def process(dispatcher: Dispatcher): Unit = {
+    delayStart // TODO fix sync up of parallel schedulers
+
     var message: InboxMessage = null
     inbox.synchronized {
       if (!enableConcurrent && numActiveThreads != 0) {
@@ -120,7 +128,7 @@ private[netty] class Inbox(val endpointName: String, val endpoint: RpcEndpoint)
             endpoint.onStart()
             if (!endpoint.isInstanceOf[ThreadSafeRpcEndpoint]) {
               inbox.synchronized {
-                if (!stopped) {
+                if (!stopped.get) {
                   enableConcurrent = true
                 }
               }
@@ -162,25 +170,25 @@ private[netty] class Inbox(val endpointName: String, val endpoint: RpcEndpoint)
     }
   }
 
-  def post(message: InboxMessage): Unit = inbox.synchronized {
-    if (stopped) {
+  def post(message: InboxMessage): Unit = {
+    if (stopped.get) {
       // We already put "OnStop" into "messages", so we should drop further messages
-      onDrop(message)
+      inbox.synchronized {
+        onDrop(message)
+      }
     } else {
       messages.add(message)
-      false
     }
   }
 
   def stop(): Unit = inbox.synchronized {
     // The following codes should be in `synchronized` so that we can make sure "OnStop" is the last
     // message
-    if (!stopped) {
+    if (!stopped.getAndSet(true)) {
       // We should disable concurrent here. Then when RpcEndpoint.onStop is called, it's the only
       // thread that is processing messages. So `RpcEndpoint.onStop` can release its resources
       // safely.
       enableConcurrent = false
-      stopped = true
       messages.add(OnStop)
       // Note: The concurrent events in messages will be processed one by one.
     }
@@ -214,7 +222,7 @@ private[netty] class Inbox(val endpointName: String, val endpoint: RpcEndpoint)
       case NonFatal(e) =>
         try endpoint.onError(e) catch {
           case NonFatal(ee) =>
-            if (stopped) {
+            if (stopped.get) {
               logDebug("Ignoring error", ee)
             } else {
               logError("Ignoring error", ee)

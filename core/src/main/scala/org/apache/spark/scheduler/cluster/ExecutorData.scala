@@ -17,6 +17,8 @@
 
 package org.apache.spark.scheduler.cluster
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef}
 import org.apache.spark.scheduler.ExecutorResourceInfo
 
@@ -26,17 +28,17 @@ import org.apache.spark.scheduler.ExecutorResourceInfo
  * @param executorEndpoint The RpcEndpointRef representing this executor
  * @param executorAddress The network address of this executor
  * @param executorHost The hostname that this executor is running on
- * @param freeCores  The current number of cores available for work on the executor
+ * @param initFreeCores  The current number of cores available for work on the executor
  * @param totalCores The total number of cores available to the executor
  * @param resourcesInfo The information of the currently available resources on the executor
  * @param resourceProfileId The id of the ResourceProfile being used by this executor
  * @param registrationTs The registration timestamp of this executor
  */
-private[cluster] class ExecutorData(
+private[scheduler] class ExecutorData(
     val executorEndpoint: RpcEndpointRef,
     val executorAddress: RpcAddress,
     override val executorHost: String,
-    var freeCores: Int,
+    val initFreeCores: Int,
     override val totalCores: Int,
     override val logUrlMap: Map[String, String],
     override val attributes: Map[String, String],
@@ -44,4 +46,11 @@ private[cluster] class ExecutorData(
     override val resourceProfileId: Int,
     val registrationTs: Long
 ) extends ExecutorInfo(executorHost, totalCores, logUrlMap, attributes,
-  resourcesInfo, resourceProfileId)
+  resourcesInfo, resourceProfileId) {
+  val _freeCores: AtomicInteger = new AtomicInteger(initFreeCores)
+
+  def setFreeCores(n: Int): Unit = _freeCores.set(n)
+  def addFreeCores(n: Int): Int = _freeCores.addAndGet(n)
+
+  def getFreeCores: Int = _freeCores.get()
+}
